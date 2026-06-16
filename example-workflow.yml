@@ -1,0 +1,27 @@
+name: EU AI Act Compliance Check
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: [main, master]
+
+jobs:
+  guardia-ai-scan:
+    name: Guardia AI — EU AI Act Scan
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write  # needed to post PR comments
+      contents: read
+
+    steps:
+      - name: EU AI Act Compliance Scan
+        uses: guardia-ai/guardia-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: connect to your Guardia AI account for enhanced classification
+          guardia-api-url: ${{ secrets.GUARDIA_API_URL }}
+          guardia-api-key: ${{ secrets.GUARDIA_API_KEY }}
+          # Set to 'true' to block PRs that introduce high-risk AI without compliance
+          fail-on-high-risk: 'false'
+          fail-on-prohibited: 'true'

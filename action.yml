@@ -1,0 +1,55 @@
+name: 'Guardia AI — EU AI Act Compliance Scanner'
+description: 'Scans your repository for AI libraries and checks EU AI Act compliance on every pull request.'
+author: 'Guardia AI'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  guardia-api-url:
+    description: 'Your Guardia AI backend URL (e.g. https://api.guardia-ai.com)'
+    required: false
+    default: 'https://api.guardia-ai.com'
+  guardia-api-key:
+    description: 'Guardia AI API key (from your dashboard → API Keys)'
+    required: false
+    default: ''
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: true
+    default: ${{ github.token }}
+  fail-on-high-risk:
+    description: 'Fail the CI check if a HIGH RISK AI system is detected without full compliance'
+    required: false
+    default: 'false'
+  fail-on-prohibited:
+    description: 'Fail the CI check if a PROHIBITED AI practice is detected (always recommended)'
+    required: false
+    default: 'true'
+  scan-branch:
+    description: 'Branch to scan (defaults to the current branch)'
+    required: false
+    default: ${{ github.head_ref || github.ref_name }}
+
+outputs:
+  risk-level:
+    description: 'Highest risk level found: prohibited | high_risk | limited | minimal | none'
+  libraries-found:
+    description: 'Comma-separated list of AI libraries detected'
+  compliance-score:
+    description: 'Overall compliance score 0–100'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    GUARDIA_API_URL: ${{ inputs.guardia-api-url }}
+    GUARDIA_API_KEY: ${{ inputs.guardia-api-key }}
+    GITHUB_TOKEN: ${{ inputs.github-token }}
+    FAIL_ON_HIGH_RISK: ${{ inputs.fail-on-high-risk }}
+    FAIL_ON_PROHIBITED: ${{ inputs.fail-on-prohibited }}
+    SCAN_BRANCH: ${{ inputs.scan-branch }}
+    GITHUB_REPO: ${{ github.repository }}
+    GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+    GITHUB_SHA: ${{ github.sha }}
