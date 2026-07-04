@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
 Guardia AI GitHub Action — EU AI Act Compliance Scanner.
-Scans the repository for AI libraries, calls Guardia AI API (if configured),
-and posts a compliance report as a PR comment.
+Scans the repository for AI libraries (Python, JS/TS, Go, Java, Ruby, Rust) and
+AI usage hidden in config files, calls Guardia AI API (if configured), and posts
+a compliance report as a PR comment.
+
+Detection logic lives in detection.py (kept in sync with the Guardia backend).
 """
 import base64
-import json
 import os
-import re
 import sys
 from datetime import datetime
 from typing import Optional
 
 import httpx
+from detection import LIBRARY_META, detect_file, scan_workspace, should_scan
 
 # ---------- Configuration ----------
 GUARDIA_API_URL = os.environ.get("GUARDIA_API_URL", "").rstrip("/")
@@ -26,52 +28,6 @@ FAIL_ON_PROHIBITED = os.environ.get("FAIL_ON_PROHIBITED", "true").lower() == "tr
 SCAN_BRANCH = os.environ.get("SCAN_BRANCH", "main")
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 
-# ---------- AI library definitions (self-contained, no backend needed) ----------
-AI_LIBRARIES = {
-    "openai": ("LLM API", True, "OpenAI GPT models detected"),
-    "anthropic": ("LLM API", True, "Anthropic Claude models detected"),
-    "google-generativeai": ("LLM API", True, "Google Gemini models detected"),
-    "cohere": ("LLM API", True, "Cohere LLMs detected"),
-    "mistralai": ("LLM API", True, "Mistral AI models detected"),
-    "groq": ("LLM API", True, "Groq-hosted LLMs detected"),
-    "replicate": ("LLM API", True, "Replicate API detected"),
-    "huggingface_hub": ("Model Hub", True, "HuggingFace Hub usage detected"),
-    "transformers": ("ML Framework", True, "HuggingFace Transformers detected — possible self-hosted model"),
-    "diffusers": ("Generative AI", True, "HuggingFace Diffusers (image generation) detected"),
-    "torch": ("ML Framework", True, "PyTorch detected — ML model likely present"),
-    "tensorflow": ("ML Framework", True, "TensorFlow detected — ML model likely present"),
-    "keras": ("ML Framework", True, "Keras detected — ML model likely present"),
-    "sklearn": ("ML Framework", True, "scikit-learn detected"),
-    "scikit-learn": ("ML Framework", True, "scikit-learn detected"),
-    "xgboost": ("ML Framework", True, "XGBoost decision model detected"),
-    "lightgbm": ("ML Framework", True, "LightGBM decision model detected"),
-    "langchain": ("AI Orchestration", True, "LangChain AI framework detected"),
-    "llama-index": ("AI Orchestration", True, "LlamaIndex RAG framework detected"),
-    "deepface": ("Biometric AI", True, "DeepFace FACIAL RECOGNITION detected — likely HIGH RISK"),
-    "face-recognition": ("Biometric AI", True, "face-recognition library detected — likely HIGH RISK"),
-    "mediapipe": ("Computer Vision", True, "MediaPipe (pose/face) detected"),
-    "boto3": ("Cloud SDK", True, "AWS SDK detected — check for SageMaker/Rekognition usage"),
-    "google-cloud-aiplatform": ("Cloud AI", True, "Google Cloud AI Platform detected"),
-    "azure-cognitiveservices": ("Cloud AI", True, "Azure Cognitive Services detected"),
-    "pinecone": ("Vector DB", True, "Pinecone vector database detected"),
-    "chromadb": ("Vector DB", True, "ChromaDB vector database detected"),
-    "weaviate": ("Vector DB", True, "Weaviate vector database detected"),
-}
-
-SCAN_EXTENSIONS = {
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs",
-    "requirements.txt", "package.json", "pyproject.toml", "setup.py", "Pipfile",
-}
-
-SKIP_DIRS = {"node_modules", "venv", ".venv", "vendor", "dist", ".next", "__pycache__", ".git"}
-
-IMPORT_PATTERNS = [
-    re.compile(r"^\s*import\s+([\w\-]+)", re.MULTILINE),
-    re.compile(r"^\s*from\s+([\w\-]+)", re.MULTILINE),
-    re.compile(r'"([a-z][a-z0-9\-]+)"', re.MULTILINE),
-    re.compile(r"'([a-z][a-z0-9\-]+)'", re.MULTILINE),
-]
-
 RISK_LABELS = {
     "prohibited": "🚨 PROHIBITED",
     "high_risk": "🔴 HIGH RISK",
@@ -80,34 +36,21 @@ RISK_LABELS = {
     "none": "✅ NO AI DETECTED",
 }
 
-
-def should_scan(path: str) -> bool:
-    lower = path.lower()
-    if any(skip in path.split("/") for skip in SKIP_DIRS):
-        return False
-    for ext in SCAN_EXTENSIONS:
-        if lower.endswith(ext):
-            return True
-    return False
+KIND_LABELS = {
+    "model_name": "Model name",
+    "api_endpoint": "API endpoint",
+    "env_key": "Credential env key",
+}
 
 
-def extract_imports(content: str) -> set[str]:
-    found = set()
-    for pattern in IMPORT_PATTERNS:
-        for match in pattern.finditer(content):
-            name = match.group(1).strip()
-            found.add(name.lower())
-            found.add(name.replace("-", "_").lower())
-    return found
-
-
-def scan_github_repo(owner: str, repo: str, branch: str, token: Optional[str]) -> dict[str, list[str]]:
-    """Scan repo via GitHub API. Returns {library_name: [file_paths]}."""
+def scan_github_repo(owner: str, repo: str, branch: str, token: Optional[str]) -> tuple[dict, dict]:
+    """Scan repo via GitHub API. Returns (library_files, config_hits)."""
     headers = {"Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     library_files: dict[str, list[str]] = {}
+    config_hits: dict[str, tuple[str, str, list[str]]] = {}
 
     with httpx.Client(timeout=30) as client:
         tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
@@ -120,7 +63,7 @@ def scan_github_repo(owner: str, repo: str, branch: str, token: Optional[str]) -
         files = [
             item for item in tree.get("tree", [])
             if item["type"] == "blob" and should_scan(item["path"])
-        ][:120]
+        ][:150]
 
         for file_item in files:
             path = file_item["path"]
@@ -130,66 +73,43 @@ def scan_github_repo(owner: str, repo: str, branch: str, token: Optional[str]) -
                 if cr.status_code != 200:
                     continue
                 raw = base64.b64decode(cr.json().get("content", "")).decode("utf-8", errors="ignore")
-                for imp in extract_imports(raw):
-                    for lib in AI_LIBRARIES:
-                        lib_norm = lib.replace("-", "_").lower()
-                        if lib_norm == imp or lib.lower() == imp:
-                            library_files.setdefault(lib, [])
-                            if path not in library_files[lib]:
-                                library_files[lib].append(path)
+                libs, config_findings = detect_file(path, raw)
+                for lib in libs:
+                    library_files.setdefault(lib, [])
+                    if path not in library_files[lib]:
+                        library_files[lib].append(path)
+                for kind, indicator, note in config_findings:
+                    if indicator not in config_hits:
+                        config_hits[indicator] = (kind, note, [])
+                    if path not in config_hits[indicator][2]:
+                        config_hits[indicator][2].append(path)
             except Exception:
                 continue
 
-    return library_files
+    return library_files, config_hits
 
 
-def scan_local_workspace() -> dict[str, list[str]]:
+def scan_local_workspace() -> tuple[dict, dict]:
     """Fallback: scan the local filesystem (GitHub Actions workspace)."""
-    library_files: dict[str, list[str]] = {}
     workspace = os.environ.get("GITHUB_WORKSPACE", ".")
-
-    for root, dirs, files in os.walk(workspace):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            rel_path = os.path.relpath(fpath, workspace)
-            if not should_scan(fname):
-                continue
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                for imp in extract_imports(content):
-                    for lib in AI_LIBRARIES:
-                        lib_norm = lib.replace("-", "_").lower()
-                        if lib_norm == imp or lib.lower() == imp:
-                            library_files.setdefault(lib, [])
-                            if rel_path not in library_files[lib]:
-                                library_files[lib].append(rel_path)
-            except Exception:
-                continue
-
-    return library_files
+    return scan_workspace(workspace)
 
 
-def determine_risk_level(library_files: dict[str, list[str]]) -> str:
-    if not library_files:
+def determine_risk_level(library_files: dict, config_hits: dict) -> str:
+    if not library_files and not config_hits:
         return "none"
     for lib in library_files:
-        cat, _, note = AI_LIBRARIES.get(lib, ("", False, ""))
+        cat, note = LIBRARY_META.get(lib, ("", ""))
         if "biometric" in cat.lower() or "facial" in note.lower():
             return "high_risk"
     return "limited"
 
 
-def call_guardia_api(library_files: dict[str, list[str]]) -> Optional[dict]:
+def call_guardia_api(library_files: dict) -> Optional[dict]:
     """Call Guardia AI backend for enhanced classification (optional)."""
     if not GUARDIA_API_URL or not GUARDIA_API_KEY:
         return None
     try:
-        libraries = [
-            {"library": lib, "files": files[:3]}
-            for lib, files in library_files.items()
-        ]
         headers = {"Authorization": f"Bearer {GUARDIA_API_KEY}", "Content-Type": "application/json"}
         with httpx.Client(timeout=20) as client:
             r = client.post(
@@ -209,7 +129,7 @@ def call_guardia_api(library_files: dict[str, list[str]]) -> Optional[dict]:
     return None
 
 
-def build_pr_comment(library_files: dict[str, list[str]], risk_level: str, api_result: Optional[dict]) -> str:
+def build_pr_comment(library_files: dict, config_hits: dict, risk_level: str, api_result: Optional[dict]) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     risk_label = RISK_LABELS.get(risk_level, risk_level)
 
@@ -220,7 +140,7 @@ def build_pr_comment(library_files: dict[str, list[str]], risk_level: str, api_r
         "",
     ]
 
-    if not library_files:
+    if not library_files and not config_hits:
         lines += [
             "✅ **No AI libraries detected** in this pull request.",
             "",
@@ -228,21 +148,34 @@ def build_pr_comment(library_files: dict[str, list[str]], risk_level: str, api_r
         ]
         return "\n".join(lines)
 
-    lines += [
-        f"### Risk Assessment: {risk_label}",
-        "",
-        "| AI Library | Category | Files | EU AI Act Note |",
-        "|-----------|----------|-------|----------------|",
-    ]
+    lines += [f"### Risk Assessment: {risk_label}", ""]
 
-    for lib, files in library_files.items():
-        cat, _, note = AI_LIBRARIES.get(lib, ("Unknown", True, "Review required"))
-        file_list = ", ".join(f"`{f}`" for f in files[:2])
-        if len(files) > 2:
-            file_list += f" +{len(files) - 2} more"
-        lines.append(f"| `{lib}` | {cat} | {file_list} | {note} |")
+    if library_files:
+        lines += [
+            "| AI Library | Category | Files | EU AI Act Note |",
+            "|-----------|----------|-------|----------------|",
+        ]
+        for lib, files in library_files.items():
+            cat, note = LIBRARY_META.get(lib, ("Unknown", "Review required"))
+            file_list = ", ".join(f"`{f}`" for f in files[:2])
+            if len(files) > 2:
+                file_list += f" +{len(files) - 2} more"
+            lines.append(f"| `{lib}` | {cat} | {file_list} | {note} |")
+        lines += [""]
 
-    lines += [""]
+    if config_hits:
+        lines += [
+            "### 🔍 AI usage found in configuration files",
+            "",
+            "| Indicator | Type | Files | Note |",
+            "|-----------|------|-------|------|",
+        ]
+        for indicator, (kind, note, files) in config_hits.items():
+            file_list = ", ".join(f"`{f}`" for f in files[:2])
+            if len(files) > 2:
+                file_list += f" +{len(files) - 2} more"
+            lines.append(f"| `{indicator}` | {KIND_LABELS.get(kind, kind)} | {file_list} | {note} |")
+        lines += [""]
 
     if api_result:
         confidence = api_result.get("confidence", "N/A")
@@ -275,7 +208,7 @@ def build_pr_comment(library_files: dict[str, list[str]], risk_level: str, api_r
             lines += [
                 "### ⚠️ Action Required",
                 "",
-                "AI libraries detected in this PR. Review the following before merging:",
+                "AI usage detected in this PR. Review the following before merging:",
                 "",
                 "- [ ] Register these AI systems in your [Guardia AI dashboard](https://guardia-ai.com)",
                 "- [ ] Run a full risk classification",
@@ -334,11 +267,12 @@ def main() -> None:
 
     # Scan
     if owner and repo:
-        library_files = scan_github_repo(owner, repo, SCAN_BRANCH, GITHUB_TOKEN or None)
+        library_files, config_hits = scan_github_repo(owner, repo, SCAN_BRANCH, GITHUB_TOKEN or None)
     else:
-        library_files = scan_local_workspace()
+        library_files, config_hits = scan_local_workspace()
 
     print(f"[guardia] Detected libraries: {list(library_files.keys()) or 'none'}")
+    print(f"[guardia] Config indicators: {list(config_hits.keys()) or 'none'}")
 
     # Enhanced classification via Guardia AI API (optional)
     api_result = call_guardia_api(library_files) if library_files else None
@@ -347,16 +281,17 @@ def main() -> None:
     if api_result:
         risk_level = api_result.get("risk_level", "minimal")
     else:
-        risk_level = determine_risk_level(library_files)
+        risk_level = determine_risk_level(library_files, config_hits)
 
     # Build and post PR comment
-    comment = build_pr_comment(library_files, risk_level, api_result)
+    comment = build_pr_comment(library_files, config_hits, risk_level, api_result)
     print("\n" + comment + "\n")
     post_pr_comment(comment)
 
     # Set GitHub Action outputs
     set_output("risk-level", risk_level)
     set_output("libraries-found", ",".join(library_files.keys()))
+    set_output("config-indicators", ",".join(config_hits.keys()))
     compliance_score = str(api_result.get("confidence", 0)) if api_result else "0"
     set_output("compliance-score", compliance_score)
 

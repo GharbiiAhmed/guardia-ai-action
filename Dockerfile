@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY scan.py .
+COPY scan.py detection.py ./
 
 ENTRYPOINT ["python", "/app/scan.py"]

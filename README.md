@@ -43,7 +43,7 @@ jobs:
 
     steps:
       - name: EU AI Act Compliance Scan
-        uses: guardia-ai/guardia-ai-action@v1
+        uses: GharbiiAhmed/guardia-ai-action@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-prohibited: 'true'
