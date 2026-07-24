@@ -220,7 +220,7 @@ def build_pr_comment(library_files: dict, config_hits: dict, risk_level: str, ap
         "---",
         "",
         "*Powered by [Guardia AI](https://guardia-ai.com) — EU AI Act compliance for developers.*  ",
-        f"*Enforcement deadline: **August 2, 2026** ({(datetime(2026, 8, 2) - datetime.utcnow()).days} days away)*",
+        f"*High-risk enforcement deadline: **2 December 2027** ({(datetime(2027, 12, 2) - datetime.utcnow()).days} days away)*",
     ]
 
     return "\n".join(lines)

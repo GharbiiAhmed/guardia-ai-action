@@ -3,7 +3,7 @@
 > Automatically scan your repository for AI libraries and check EU AI Act compliance on every pull request.
 
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Guardia%20AI-blue?logo=github)](https://github.com/marketplace/actions/guardia-ai-eu-ai-act-compliance-scanner)
-[![EU AI Act](https://img.shields.io/badge/EU%20AI%20Act-Aug%202026-red)](https://guardia-ai.com)
+[![EU AI Act](https://img.shields.io/badge/EU%20AI%20Act-Dec%202027-blue)](https://guardia-ai.com)
 
 ---
 
@@ -129,7 +129,7 @@ Add to your repo secrets:
 
 ## EU AI Act enforcement
 
-The EU AI Act general-purpose AI and high-risk AI provisions are **enforceable from August 2, 2026**.
+The EU AI Act's general-purpose AI and transparency provisions apply from **August 2, 2026**; the high-risk (Annex III) provisions apply from **2 December 2027** (deferred by the 2026 Digital Omnibus).
 
 Fines: up to **€35,000,000** or **7% of global annual turnover**.
 
