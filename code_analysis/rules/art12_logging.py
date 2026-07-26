@@ -13,6 +13,7 @@ the second error is much cheaper than the first.
 from __future__ import annotations
 
 from .. import fingerprint, providers
+from ..fixers import build_logging_fix
 from ..models import CodeFinding, LegalReference
 from .base import Rule, RuleContext
 
@@ -137,6 +138,11 @@ class Article12Logging(Rule):
                     # Absence within one function is a local, checkable claim.
                     # Absence across the whole file is stronger evidence.
                     confidence="medium" if module_logs else "high",
-                    fix=None,
+                    # Offered only where a logger already exists — see the
+                    # fixer for why it does not introduce one.
+                    fix=build_logging_fix(
+                        ctx.source, ctx.file.language, call.callee,
+                        call.line, call.end_line,
+                    ),
                 ))
         return findings

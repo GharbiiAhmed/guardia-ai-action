@@ -18,6 +18,7 @@ JS/TS rather than failing: a missing optional parser must not break a scan.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from .filemodel import CallRef, FileModel, FunctionModel
@@ -390,10 +391,22 @@ def json_response_objects(path: str, source: str, start_line: int, end_line: int
             key = pair.child_by_field_name("key") if pair.type == "pair" else None
             if key is not None:
                 keys.append(_text(key, data).strip("'\"`"))
+        # An error payload is not the AI-generated content. Two signals say so:
+        # an explicit 4xx/5xx status in the second argument, and a body whose
+        # keys are only ever used for errors. Without this, every real route
+        # declined a fix — they all have error branches.
+        status = 0
+        if len(args.named_children) > 1:
+            options = _text(args.named_children[1], data)
+            match = re.search(r"status\s*:\s*(\d{3})", options)
+            if match:
+                status = int(match.group(1))
+
         found.append({
             "line": first.start_point[0] + 1,
             "end_line": first.end_point[0] + 1,
             "text": _text(first, data),
             "keys": keys,
+            "status": status,
         })
     return found

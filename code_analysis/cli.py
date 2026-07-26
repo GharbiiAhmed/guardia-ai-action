@@ -79,6 +79,21 @@ def _head_sha(path: str) -> str:
         return ""
 
 
+def _current_branch(path: str) -> str:
+    """The checked-out branch, so a fix targets the code that was scanned."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        branch = result.stdout.strip()
+        return "" if branch in {"", "HEAD"} else branch
+    except (OSError, ValueError):
+        return ""
+
+
 def _upload(result, args) -> None:
     """Send findings to the dashboard.
 
@@ -92,6 +107,7 @@ def _upload(result, args) -> None:
     payload = json.dumps({
         "repo": args.repo or os.path.basename(os.path.abspath(args.path)),
         "commit_sha": args.commit,
+        "branch": args.branch,
         "findings": [
             {
                 "fingerprint": f.fingerprint,
@@ -107,6 +123,10 @@ def _upload(result, args) -> None:
                 "suppressed": f.suppressed,
                 "suppression_reason": f.suppression_reason,
                 "fix_available": f.fix is not None,
+                "fix_description": f.fix.description if f.fix else None,
+                "fix_replacement": f.fix.replacement if f.fix else None,
+                "fix_start_line": f.fix.start_line if f.fix else None,
+                "fix_end_line": f.fix.end_line if f.fix else None,
             }
             for f in result.findings
         ],
@@ -175,6 +195,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--repo", default="", help="repository name, recorded in the evidence")
     parser.add_argument(
+        "--branch",
+        default="",
+        help="branch these findings were seen on; defaults to the checkout's own. "
+             "A fix is opened against this branch, not the repository default.",
+    )
+    parser.add_argument(
         "--commit",
         default="",
         help="commit sha, recorded in the evidence; defaults to the checkout's HEAD",
@@ -227,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.commit:
         args.commit = _head_sha(args.path)
+    if not args.branch:
+        args.branch = _current_branch(args.path)
 
     result = analyze_workspace(args.path, rules=rules, include_non_shipped=args.include_tests)
 

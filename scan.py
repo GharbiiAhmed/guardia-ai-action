@@ -368,6 +368,7 @@ def upload_findings(result) -> None:
     payload = {
         "repo": GITHUB_REPO,
         "commit_sha": GITHUB_SHA,
+        "branch": SCAN_BRANCH,
         "findings": [
             {
                 "fingerprint": f.fingerprint,
@@ -385,6 +386,10 @@ def upload_findings(result) -> None:
                 "suppressed": f.suppressed,
                 "suppression_reason": f.suppression_reason,
                 "fix_available": f.fix is not None,
+                "fix_description": f.fix.description if f.fix else None,
+                "fix_replacement": f.fix.replacement if f.fix else None,
+                "fix_start_line": f.fix.start_line if f.fix else None,
+                "fix_end_line": f.fix.end_line if f.fix else None,
             }
             for f in result.findings
         ],
@@ -407,6 +412,131 @@ def upload_findings(result) -> None:
             print(f"[guardia] Could not record findings: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[guardia] Could not record findings: {e}")
+
+
+def _diff_lines(owner_repo: str, pr_number: str) -> dict:
+    """Line numbers touched by this pull request, per file.
+
+    GitHub rejects a review comment on a line outside the diff, and rejects the
+    whole review if any single comment is invalid — so the lines are checked
+    before anything is posted rather than after.
+    """
+    touched: dict = {}
+    try:
+        with httpx.Client(timeout=20) as client:
+            page = 1
+            while page <= 10:
+                r = client.get(
+                    f"https://api.github.com/repos/{owner_repo}/pulls/{pr_number}/files",
+                    params={"per_page": 100, "page": page},
+                    headers={
+                        "Authorization": f"Bearer {GITHUB_TOKEN}",
+                        "Accept": "application/vnd.github.v3+json",
+                    },
+                )
+                if r.status_code != 200:
+                    break
+                files = r.json()
+                if not files:
+                    break
+                for entry in files:
+                    patch = entry.get("patch") or ""
+                    lines = set()
+                    current = 0
+                    for line in patch.splitlines():
+                        if line.startswith("@@"):
+                            # @@ -old,count +new,count @@
+                            try:
+                                current = int(line.split("+")[1].split(",")[0].split(" ")[0])
+                            except (IndexError, ValueError):
+                                current = 0
+                        elif line.startswith("+"):
+                            lines.add(current)
+                            current += 1
+                        elif not line.startswith("-"):
+                            current += 1
+                    touched[entry.get("filename")] = lines
+                if len(files) < 100:
+                    break
+                page += 1
+    except Exception as e:
+        print(f"[guardia] Could not read the diff: {e}")
+    return touched
+
+
+def post_review_suggestions(result) -> None:
+    """Offer each fix as a GitHub suggestion the author can apply in one click.
+
+    This is the whole accept path: no approval UI of ours, just the button
+    GitHub already draws on a review comment. Suggestions are only posted for
+    lines this pull request actually touched — commenting on untouched code is
+    both rejected by the API and rude.
+    """
+    if result is None or not (GITHUB_TOKEN and GITHUB_REPO and GITHUB_PR_NUMBER):
+        return
+
+    fixable = [
+        f for f in result.findings
+        if f.fix and not f.suppressed and not f.baselined
+    ]
+    if not fixable:
+        return
+
+    touched = _diff_lines(GITHUB_REPO, GITHUB_PR_NUMBER)
+    comments = []
+    for finding in fixable:
+        lines = touched.get(finding.file)
+        if not lines:
+            continue
+        span = range(finding.fix.start_line, finding.fix.end_line + 1)
+        if not any(line in lines for line in span):
+            continue
+
+        body = (
+            f"**{finding.rule_id}** — {finding.fix.description}\n\n"
+            f"```suggestion\n{finding.fix.replacement}\n```\n\n"
+            f"> {finding.legal.text}\n\n"
+            f"Applying this is a judgement call: whether this payload is what "
+            f"your users actually see is something only you can confirm."
+        )
+        comment = {
+            "path": finding.file,
+            "line": finding.fix.end_line,
+            "side": "RIGHT",
+            "body": body,
+        }
+        if finding.fix.end_line > finding.fix.start_line:
+            comment["start_line"] = finding.fix.start_line
+            comment["start_side"] = "RIGHT"
+        comments.append(comment)
+
+    if not comments:
+        return
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.post(
+                f"https://api.github.com/repos/{GITHUB_REPO}/pulls/{GITHUB_PR_NUMBER}/reviews",
+                json={
+                    "event": "COMMENT",
+                    "body": (
+                        "Guardia AI has suggested a fix for the findings below. "
+                        "Apply, edit, or ignore — a finding closes itself once a "
+                        "scan no longer sees it, however you resolved it."
+                    ),
+                    "comments": comments,
+                },
+                headers={
+                    "Authorization": f"Bearer {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+            )
+        if r.status_code in (200, 201):
+            print(f"[guardia] Posted {len(comments)} suggestion(s) on the pull request.")
+        else:
+            print(f"[guardia] Could not post suggestions: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[guardia] Could not post suggestions: {e}")
 
 
 def build_findings_section(result) -> list:
@@ -514,6 +644,7 @@ def main() -> None:
     # Article-level findings from the source itself
     analysis = run_code_analysis()
     upload_findings(analysis)
+    post_review_suggestions(analysis)
 
     # Build and post PR comment
     comment = build_pr_comment(library_files, config_hits, risk_level, api_result)

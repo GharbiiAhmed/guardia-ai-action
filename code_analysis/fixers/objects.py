@@ -33,12 +33,15 @@ def insert_entry(
         return None
 
     if start_line == end_line:
+        # Keep whatever spacing the file uses inside its braces: a patch that
+        # reformats the line it touches reads as noise in a diff.
+        lead = " " if segment.startswith("{ ") else ""
         inner = segment[1:].lstrip()
         if inner.startswith("}"):
             # `{}` — nothing to separate the new entry from.
-            replacement = "{" + entry + "}"
+            replacement = "{" + lead + entry + lead + "}"
         else:
-            replacement = "{" + entry + ", " + inner
+            replacement = "{" + lead + entry + ", " + inner
         if not replacement.rstrip().endswith("}"):
             return None
         original = lines[start_line - 1]
