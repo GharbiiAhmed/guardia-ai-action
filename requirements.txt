@@ -1,1 +1,10 @@
 httpx>=0.26.0
+# The vendored analyzer's only dependency. Everything else it needs is stdlib,
+# so the action stays small and runs entirely offline.
+pydantic>=2.5.0,<3.0.0
+
+# JavaScript/TypeScript parsing. Optional: the analyzer degrades to
+# Python-only if these are absent rather than failing a scan.
+tree-sitter>=0.23.0
+tree-sitter-javascript>=0.23.0
+tree-sitter-typescript>=0.23.0

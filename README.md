@@ -140,3 +140,87 @@ Start your compliance audit free at [guardia-ai.com/free-audit](https://guardia-
 ## License
 
 MIT © [Guardia AI](https://guardia-ai.com)
+
+---
+
+## Article-level code findings
+
+Beyond detecting *which* AI libraries you use, the scanner reads your source and
+reports specific obligations at specific lines:
+
+| Rule | What it looks for |
+|------|-------------------|
+| `GA-ART50-001` | A user-facing endpoint that reaches a model, with no disclosure anywhere in the repository that responses are AI-generated |
+| `GA-ART12-001` | A model invoked with no logging, audit or tracing call in scope |
+
+Findings appear three ways: as a comment on the pull request, as inline
+annotations via SARIF (upload it to code scanning), and — with an API key — as a
+record in your Guardia dashboard that tracks what you fixed and what you
+introduced, commit by commit.
+
+```yaml
+- uses: GharbiiAhmed/guardia-ai-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    guardia-api-key: ${{ secrets.GUARDIA_API_KEY }}   # optional — keeps the record
+    code-analysis: 'true'
+    fail-on-findings: 'none'    # observe first; switch to 'high' when you're ready
+
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: guardia.sarif
+```
+
+`security-events: write` is needed on the job for the SARIF upload.
+
+### Accepting a finding
+
+Findings resolve themselves. Fix the code — our patch or your own — and the next
+scan simply stops reporting it. Nothing to click.
+
+To accept one instead, say so in the code:
+
+```python
+# guardia: ignore GA-ART50-001 — notice is rendered by the chat UI shell
+```
+
+That never fails a build, and it arrives in your dashboard as a documented risk
+acceptance with the author from git blame, which is what an auditor wants to see.
+
+### Adopting on an existing codebase
+
+A five-year-old repository will have findings nobody currently on the team
+caused. Freeze them once, and only new work has to be clean:
+
+```
+guardia-scan . --write-baseline .guardia/baseline.json
+```
+
+Commit that file. Baselined findings stay visible in the report and in your
+dashboard — they just never fail the check. Anything introduced afterwards does.
+
+### Evidence for an audit
+
+Each run can write a tamper-evident record — what was found, on which commit,
+under which version of the rule pack, and how much legal review each rule had at
+the time:
+
+```yaml
+- uses: GharbiiAhmed/guardia-ai-action@v1
+  with:
+    evidence-file: guardia-evidence.json
+    evidence-signing-key: ${{ secrets.GUARDIA_EVIDENCE_KEY }}   # optional
+```
+
+Records chain by hash, so altering a past one breaks every record after it.
+Without a signing key that proves internal consistency, not authenticity — the
+record says so itself rather than leaving you to assume.
+
+### What it does not do
+
+Findings state what your code does and quote the obligation. They do not assert
+that you are in breach — whether an obligation applies depends on your system's
+purpose and deployment context, which no code scan can determine. The rules cite
+Regulation (EU) 2024/1689 verbatim so you can check the reasoning yourself.
+
+Detection runs entirely offline. Your source never leaves the runner.
