@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import urllib.error
+import urllib.request
 
 from . import baseline as baseline_module
 from . import evidence as evidence_module
@@ -56,6 +59,60 @@ def _render_text(result, root: str) -> str:
         + f" in {result.duration_ms}ms."
     )
     return "\n".join(lines)
+
+
+def _upload(result, args) -> None:
+    """Send findings to the dashboard.
+
+    Uses urllib rather than a client library so the analyzer keeps its single
+    dependency. Never raises: a scan is still useful when the network is not.
+    """
+    if not args.api_key:
+        print("[guardia] --upload needs --api-key or $GUARDIA_API_KEY.", file=sys.stderr)
+        return
+
+    payload = json.dumps({
+        "repo": args.repo or os.path.basename(os.path.abspath(args.path)),
+        "commit_sha": args.commit,
+        "findings": [
+            {
+                "fingerprint": f.fingerprint,
+                "rule_id": f.rule_id,
+                "file": f.file,
+                "line": f.line,
+                "symbol": f.symbol,
+                "claim": f.claim,
+                "article": f.legal.citation,
+                "article_text": f.legal.text,
+                "severity": f.severity,
+                "confidence": f.confidence,
+                "suppressed": f.suppressed,
+                "suppression_reason": f.suppression_reason,
+                "fix_available": f.fix is not None,
+            }
+            for f in result.findings
+        ],
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        f"{args.app_url.rstrip('/')}/api/code-findings",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {args.api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read())
+        print(
+            f"[guardia] Recorded: {body.get('introduced', 0)} new, "
+            f"{body.get('resolved', 0)} resolved since the last scan.",
+            file=sys.stderr,
+        )
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        print(f"[guardia] Could not record findings: {error}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +161,21 @@ def main(argv: list[str] | None = None) -> int:
         "--signing-key",
         help="HMAC key binding the record to its holder; without one the chain "
              "proves consistency but not authenticity",
+    )
+    parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="send the findings to your Guardia dashboard (needs --api-key)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("GUARDIA_API_KEY", ""),
+        help="API key from your dashboard; defaults to $GUARDIA_API_KEY",
+    )
+    parser.add_argument(
+        "--app-url",
+        default=os.environ.get("GUARDIA_APP_URL", "https://guardia-ai.com"),
+        help="your Guardia app URL",
     )
     parser.add_argument(
         "--rule-cards",
@@ -184,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[guardia] wrote {args.format} to {args.output}", file=sys.stderr)
     else:
         print(payload)
+
+    if args.upload:
+        _upload(result, args)
 
     if args.fail_on != "none":
         threshold = _SEVERITY_ORDER[args.fail_on]
