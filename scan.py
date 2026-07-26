@@ -8,6 +8,7 @@ a compliance report as a PR comment.
 Detection logic lives in detection.py (kept in sync with the Guardia backend).
 """
 import base64
+import json
 import os
 import sys
 from datetime import datetime
@@ -16,17 +17,78 @@ from typing import Optional
 import httpx
 from detection import LIBRARY_META, detect_file, scan_workspace, should_scan
 
+# Vendored by sync_analyzer.sh — the action ships as a self-contained image and
+# cannot import from the backend. Guarded so an image built before the sync
+# still runs the library scan rather than crashing on import.
+try:
+    from code_analysis import analyze_workspace
+    from code_analysis import baseline as baseline_module
+    from code_analysis import evidence as evidence_module
+    from code_analysis import sarif as sarif_output
+    CODE_ANALYSIS_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on image build
+    CODE_ANALYSIS_AVAILABLE = False
+
 # ---------- Configuration ----------
 GUARDIA_API_URL = os.environ.get("GUARDIA_API_URL", "").rstrip("/")
 GUARDIA_API_KEY = os.environ.get("GUARDIA_API_KEY", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
-GITHUB_PR_NUMBER = os.environ.get("GITHUB_PR_NUMBER", "")
+# GitHub exports GITHUB_REPOSITORY and GITHUB_SHA to every action. An action's
+# runs.env cannot reference the `github` context — only `inputs` — so reading
+# the built-ins is the supported route. Setting them in action.yml made the
+# action fail to load entirely.
+GITHUB_REPO = os.environ.get("GITHUB_REPO") or os.environ.get("GITHUB_REPOSITORY", "")
+def _pr_number() -> str:
+    """The pull request number, from the event payload or the ref."""
+    explicit = os.environ.get("GITHUB_PR_NUMBER", "")
+    if explicit:
+        return explicit
+    path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            number = (payload.get("pull_request") or {}).get("number")
+            if number:
+                return str(number)
+        except (OSError, ValueError):
+            pass
+    # refs/pull/123/merge
+    ref = os.environ.get("GITHUB_REF", "")
+    parts = ref.split("/")
+    if len(parts) > 2 and parts[1] == "pull":
+        return parts[2]
+    return ""
+
+
+GITHUB_PR_NUMBER = _pr_number()
 GITHUB_SHA = os.environ.get("GITHUB_SHA", "")
 FAIL_ON_HIGH_RISK = os.environ.get("FAIL_ON_HIGH_RISK", "false").lower() == "true"
 FAIL_ON_PROHIBITED = os.environ.get("FAIL_ON_PROHIBITED", "true").lower() == "true"
 SCAN_BRANCH = os.environ.get("SCAN_BRANCH", "main")
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
+
+# Code analysis runs against the checked-out workspace, not the GitHub API —
+# it needs real files on disk.
+WORKSPACE = os.environ.get("GITHUB_WORKSPACE", ".")
+ENABLE_CODE_ANALYSIS = os.environ.get("CODE_ANALYSIS", "true").lower() == "true"
+SARIF_FILE = os.environ.get("SARIF_FILE", "guardia.sarif")
+# Default 'none': a scanner should observe a repository before it blocks anyone.
+FAIL_ON_FINDINGS = os.environ.get("FAIL_ON_FINDINGS", "none").lower()
+# Findings that predate adoption. Without this a five-year-old repo lights
+# up red on day one and the check gets deleted.
+BASELINE_FILE = os.environ.get("BASELINE_FILE", ".guardia/baseline.json")
+# A tamper-evident record of the run, for the audit trail rather than the
+# developer. Empty disables it.
+EVIDENCE_FILE = os.environ.get("EVIDENCE_FILE", "guardia-evidence.json")
+EVIDENCE_PREVIOUS = os.environ.get("EVIDENCE_PREVIOUS", "")
+EVIDENCE_SIGNING_KEY = os.environ.get("EVIDENCE_SIGNING_KEY", "")
+
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+# Findings are posted to the app, not the backend API: that is where the
+# record lives and where the dashboard reads it from.
+GUARDIA_APP_URL = os.environ.get("GUARDIA_APP_URL", "https://guardia-ai.com").rstrip("/")
 
 RISK_LABELS = {
     "prohibited": "🚨 PROHIBITED",
@@ -226,6 +288,172 @@ def build_pr_comment(library_files: dict, config_hits: dict, risk_level: str, ap
     return "\n".join(lines)
 
 
+def run_code_analysis():
+    """Article-level findings from the source itself. Returns None if disabled."""
+    if not ENABLE_CODE_ANALYSIS or not CODE_ANALYSIS_AVAILABLE:
+        if ENABLE_CODE_ANALYSIS:
+            print("[guardia] Code analysis unavailable in this image — skipping.")
+        return None
+    try:
+        result = analyze_workspace(WORKSPACE)
+    except Exception as e:
+        # The library scan is still worth delivering if the analyzer trips.
+        print(f"[guardia] Code analysis failed: {e}")
+        return None
+
+    known = baseline_module.load(os.path.join(WORKSPACE, BASELINE_FILE)) if BASELINE_FILE else None
+    if known:
+        baseline_module.apply(result, known)
+        print(f"[guardia] Baseline: {len(known)} pre-existing finding(s) will not block.")
+
+    print(
+        f"[guardia] Code analysis: {len(result.findings)} finding(s) across "
+        f"{result.files_scanned} file(s) in {result.duration_ms}ms"
+    )
+    if SARIF_FILE:
+        try:
+            with open(SARIF_FILE, "w", encoding="utf-8") as f:
+                f.write(sarif_output.dumps(result))
+            print(f"[guardia] SARIF written to {SARIF_FILE}")
+        except OSError as e:
+            print(f"[guardia] Could not write SARIF: {e}")
+
+    write_evidence(result)
+    return result
+
+
+def write_evidence(result) -> None:
+    """A record of what was true on this commit, for a conformity assessment.
+
+    Never fails the run: an audit artifact is worth having, not worth breaking
+    someone's pipeline over.
+    """
+    if not EVIDENCE_FILE:
+        return
+    previous_hash = None
+    if EVIDENCE_PREVIOUS and os.path.exists(EVIDENCE_PREVIOUS):
+        try:
+            with open(EVIDENCE_PREVIOUS, "r", encoding="utf-8") as f:
+                previous_hash = json.load(f).get("record_hash")
+        except (OSError, ValueError):
+            previous_hash = None
+    try:
+        bundle = evidence_module.build(
+            result,
+            repo=GITHUB_REPO,
+            commit_sha=GITHUB_SHA,
+            previous_hash=previous_hash,
+            signing_key=EVIDENCE_SIGNING_KEY or None,
+        )
+        with open(EVIDENCE_FILE, "w", encoding="utf-8") as f:
+            f.write(evidence_module.dumps(bundle))
+        print(
+            f"[guardia] Evidence record {bundle['record_hash'][:12]} written to "
+            f"{EVIDENCE_FILE}"
+        )
+    except Exception as e:
+        print(f"[guardia] Could not write evidence: {e}")
+
+
+def upload_findings(result) -> None:
+    """Send this scan to the customer's Guardia account.
+
+    Optional by design: without a key the action still annotates the PR, it
+    just does not accumulate a record. Failure here never fails the build —
+    a compliance report is not worth breaking someone's pipeline over.
+    """
+    if result is None or not GUARDIA_API_KEY:
+        return
+
+    payload = {
+        "repo": GITHUB_REPO,
+        "commit_sha": GITHUB_SHA,
+        "findings": [
+            {
+                "fingerprint": f.fingerprint,
+                "rule_id": f.rule_id,
+                "file": f.file,
+                "line": f.line,
+                "symbol": f.symbol,
+                "claim": f.claim,
+                "article": (
+                    f.legal.article + (f"({f.legal.paragraph})" if f.legal.paragraph else "")
+                ),
+                "article_text": f.legal.text,
+                "severity": f.severity,
+                "confidence": f.confidence,
+                "suppressed": f.suppressed,
+                "suppression_reason": f.suppression_reason,
+                "fix_available": f.fix is not None,
+            }
+            for f in result.findings
+        ],
+    }
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.post(
+                f"{GUARDIA_APP_URL}/api/code-findings",
+                json=payload,
+                headers={"Authorization": f"Bearer {GUARDIA_API_KEY}"},
+            )
+        if r.status_code == 200:
+            body = r.json()
+            print(
+                f"[guardia] Recorded: {body.get('introduced', 0)} new, "
+                f"{body.get('resolved', 0)} resolved since the last scan."
+            )
+        else:
+            print(f"[guardia] Could not record findings: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[guardia] Could not record findings: {e}")
+
+
+def build_findings_section(result) -> list:
+    """Findings as PR-comment markdown, quoting the obligation rather than
+    asserting a verdict."""
+    if result is None:
+        return []
+
+    active = [f for f in result.findings if not f.suppressed and not f.baselined]
+    accepted = [f for f in result.findings if f.suppressed]
+    baselined = [f for f in result.findings if f.baselined]
+
+    lines = ["### 📄 Article-level findings", ""]
+    if not active:
+        lines += [
+            f"No findings in {result.files_scanned} scanned file(s).",
+            "",
+        ]
+    for f in active:
+        citation = f.legal.article + (f"({f.legal.paragraph})" if f.legal.paragraph else "")
+        lines += [
+            f"**`{f.file}:{f.line}`** — {f.rule_id} · {f.severity}/{f.confidence} confidence",
+            "",
+            f"{f.claim}",
+            "",
+            f"> **{citation}**: {f.legal.text}",
+            "",
+        ]
+        if f.fix:
+            lines += [f"*Suggested fix available: {f.fix.description}*", ""]
+        if not f.legal.reviewed_by:
+            lines += ["*This rule has not yet been reviewed by legal counsel.*", ""]
+
+    if accepted:
+        lines += [f"{len(accepted)} finding(s) suppressed in source as accepted risks.", ""]
+    if baselined:
+        lines += [f"{len(baselined)} pre-existing finding(s) held in the baseline.", ""]
+
+    lines += [
+        "Findings state what the code does and quote the obligation. Whether an "
+        "obligation applies depends on your system's purpose and deployment "
+        "context, which a code scan cannot determine.",
+        "",
+    ]
+    return lines
+
+
 def post_pr_comment(comment: str) -> None:
     if not GITHUB_TOKEN or not GITHUB_REPO or not GITHUB_PR_NUMBER:
         print("[guardia] Skipping PR comment — no GITHUB_TOKEN, REPO, or PR_NUMBER set.")
@@ -283,8 +511,20 @@ def main() -> None:
     else:
         risk_level = determine_risk_level(library_files, config_hits)
 
+    # Article-level findings from the source itself
+    analysis = run_code_analysis()
+    upload_findings(analysis)
+
     # Build and post PR comment
     comment = build_pr_comment(library_files, config_hits, risk_level, api_result)
+    findings_section = build_findings_section(analysis)
+    if findings_section:
+        marker = "\n---\n\n*Powered by"
+        addition = "\n".join(findings_section)
+        if marker in comment:
+            comment = comment.replace(marker, "\n" + addition + marker, 1)
+        else:
+            comment = comment + "\n" + addition
     print("\n" + comment + "\n")
     post_pr_comment(comment)
 
@@ -295,6 +535,23 @@ def main() -> None:
     compliance_score = str(api_result.get("confidence", 0)) if api_result else "0"
     set_output("compliance-score", compliance_score)
 
+    blocking = []
+    if analysis is not None:
+        active = [f for f in analysis.findings if not f.suppressed and not f.baselined]
+        set_output("findings-count", str(len(active)))
+        set_output("sarif-file", SARIF_FILE)
+        if FAIL_ON_FINDINGS != "none":
+            threshold = _SEVERITY_ORDER.get(FAIL_ON_FINDINGS, 99)
+            # Suppressed findings never block: that is what an accepted risk is.
+            # Advisory rules never gate: they read an obligation rather than
+            # matching its plain words.
+            blocking = [
+                f for f in active
+                if not f.advisory and _SEVERITY_ORDER.get(f.severity, 0) >= threshold
+            ]
+    else:
+        set_output("findings-count", "0")
+
     # Determine exit code
     should_fail = (
         (risk_level == "prohibited" and FAIL_ON_PROHIBITED) or
@@ -303,6 +560,13 @@ def main() -> None:
 
     if should_fail:
         print(f"\n[guardia] ❌ Failing CI: risk_level={risk_level} and fail-on-{risk_level} is enabled.")
+        sys.exit(1)
+
+    if blocking:
+        print(
+            f"\n[guardia] ❌ Failing CI: {len(blocking)} finding(s) at or above "
+            f"'{FAIL_ON_FINDINGS}'."
+        )
         sys.exit(1)
 
     print(f"\n[guardia] ✅ Scan complete. Risk level: {risk_level}")

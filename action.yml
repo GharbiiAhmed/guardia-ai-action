@@ -11,6 +11,10 @@ inputs:
     description: 'Your Guardia AI backend URL (e.g. https://api.guardia-ai.com)'
     required: false
     default: 'https://api.guardia-ai.com'
+  guardia-app-url:
+    description: 'Your Guardia AI app URL — where findings are recorded'
+    required: false
+    default: 'https://guardia-ai.com'
   guardia-api-key:
     description: 'Guardia AI API key (from your dashboard → API Keys)'
     required: false
@@ -27,12 +31,40 @@ inputs:
     description: 'Fail the CI check if a PROHIBITED AI practice is detected (always recommended)'
     required: false
     default: 'true'
+  code-analysis:
+    description: 'Analyse source code for article-level findings (Article 50, Article 12)'
+    required: false
+    default: 'true'
+  fail-on-findings:
+    description: 'Fail the check when a code finding at or above this severity is present: none | low | medium | high | critical'
+    required: false
+    default: 'none'
+  baseline-file:
+    description: 'Path to a baseline of pre-existing findings, which never fail the check'
+    required: false
+    default: '.guardia/baseline.json'
+  evidence-file:
+    description: 'Where to write the tamper-evident record of this run (empty to disable)'
+    required: false
+    default: 'guardia-evidence.json'
+  evidence-signing-key:
+    description: 'HMAC key binding evidence records to your organisation. Without one the chain proves consistency but not authenticity'
+    required: false
+    default: ''
+  sarif-file:
+    description: 'Where to write the SARIF report, for upload to GitHub code scanning'
+    required: false
+    default: 'guardia.sarif'
   scan-branch:
     description: 'Branch to scan (defaults to the current branch)'
     required: false
     default: ${{ github.head_ref || github.ref_name }}
 
 outputs:
+  findings-count:
+    description: 'Number of unsuppressed article-level code findings'
+  sarif-file:
+    description: 'Path to the SARIF report produced by this run'
   risk-level:
     description: 'Highest risk level found: prohibited | high_risk | limited | minimal | none'
   libraries-found:
@@ -46,10 +78,14 @@ runs:
   env:
     GUARDIA_API_URL: ${{ inputs.guardia-api-url }}
     GUARDIA_API_KEY: ${{ inputs.guardia-api-key }}
+    GUARDIA_APP_URL: ${{ inputs.guardia-app-url }}
     GITHUB_TOKEN: ${{ inputs.github-token }}
     FAIL_ON_HIGH_RISK: ${{ inputs.fail-on-high-risk }}
     FAIL_ON_PROHIBITED: ${{ inputs.fail-on-prohibited }}
     SCAN_BRANCH: ${{ inputs.scan-branch }}
-    GITHUB_REPO: ${{ github.repository }}
-    GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
-    GITHUB_SHA: ${{ github.sha }}
+    CODE_ANALYSIS: ${{ inputs.code-analysis }}
+    FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+    SARIF_FILE: ${{ inputs.sarif-file }}
+    BASELINE_FILE: ${{ inputs.baseline-file }}
+    EVIDENCE_FILE: ${{ inputs.evidence-file }}
+    EVIDENCE_SIGNING_KEY: ${{ inputs.evidence-signing-key }}
