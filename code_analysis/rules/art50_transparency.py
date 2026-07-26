@@ -21,7 +21,11 @@ from __future__ import annotations
 import re
 
 from .. import callgraph, disclosure, fingerprint, providers
-from ..fixers import build_disclosure_fix, build_js_disclosure_fix
+from ..fixers import (
+    build_disclosure_fix,
+    build_js_disclosure_fix,
+    build_ui_notice_fix,
+)
 from ..models import CodeFinding, LegalReference
 from .base import Rule, RuleContext
 
@@ -186,7 +190,9 @@ class Article50Disclosure(Rule):
             legal=self.legal,
             severity=self.severity,
             confidence="medium" if elsewhere else "high",
-            fix=None,
+            fix=build_ui_notice_fix(
+                ctx.source, ctx.file.imports, call.line, call.end_line,
+            ),
         )
 
     def _reach(self, ctx: RuleContext, func):

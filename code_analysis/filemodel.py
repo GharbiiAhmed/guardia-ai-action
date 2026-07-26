@@ -23,6 +23,9 @@ class CallRef:
     end_line: int
     col: int = 0
     snippet: str = ""
+    # True when this call only runs if something went wrong. A log inside an
+    # exception handler records failures, not the events the system performed.
+    in_error_handler: bool = False
 
 
 @dataclass
@@ -104,6 +107,15 @@ def from_python(path: str, source: str, tree) -> FileModel:
                     model.resolvable.add(alias.asname)
 
     lines = source.splitlines()
+
+    # Calls that live inside an `except` block.
+    handled: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    handled.add(id(inner))
+
     by_id: dict[int, FunctionModel] = {}
     for site in astutil.iter_calls(tree):
         ref = CallRef(
@@ -111,6 +123,7 @@ def from_python(path: str, source: str, tree) -> FileModel:
             line=site.node.lineno,
             end_line=getattr(site.node, "end_lineno", site.node.lineno) or site.node.lineno,
             col=site.node.col_offset,
+            in_error_handler=id(site.node) in handled,
         )
         if site.func is None:
             model.module_calls.append(ref)

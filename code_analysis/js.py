@@ -246,6 +246,14 @@ def from_javascript(path: str, source: str) -> Optional[FileModel]:
         model.functions.append(func)
         model.resolvable.add(name)
 
+    # Calls inside a catch clause run only when something failed.
+    handled: set[int] = set()
+    for node in nodes:
+        if node.type == "catch_clause":
+            for inner in _walk(node):
+                if inner.type == "call_expression":
+                    handled.add(inner.id)
+
     # ---- calls, attributed to their enclosing function ----
     for node in nodes:
         if node.type != "call_expression":
@@ -258,6 +266,7 @@ def from_javascript(path: str, source: str) -> Optional[FileModel]:
             line=node.start_point[0] + 1,
             end_line=node.end_point[0] + 1,
             col=node.start_point[1],
+            in_error_handler=node.id in handled,
         )
 
         enclosing = node.parent

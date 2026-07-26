@@ -13,9 +13,12 @@ So two constraints:
   happened, and the description says plainly that this is a starting point
   rather than compliance. Article 12 expects events to be traceable over the
   system's lifetime; one log line is the first of those events, not all of them.
-* It only fires where a logger already exists. Adding an import and configuring
-  a logging framework is a bigger change than a compliance scanner should make
-  to someone's code unasked.
+* Where a logger already exists it is reused. Where none does, the patch stays
+  self-contained: Python gets a function-local `import logging`, JavaScript uses
+  `console`, which is always available. Neither edits the top of the file.
+  A patch confined to the lines it claims to change is one a reviewer can judge
+  at a glance, and it keeps the whole fix expressible as a single suggestion a
+  developer can apply in one click.
 """
 from __future__ import annotations
 
@@ -31,20 +34,21 @@ _DESCRIPTION = (
     "outputs and retention your own policy requires."
 )
 
+_DESCRIPTION_NEW_LOGGER = _DESCRIPTION + (
+    " Nothing in this file logs today, so the patch brings its own logger; "
+    "route it through whatever your application already uses."
+)
+
 
 def _logger_expression(source: str, language: str) -> Optional[str]:
-    """How this file already writes a log, or None if it does not.
-
-    Deliberately conservative: introducing a logging framework is not a change
-    a scanner should make on someone's behalf.
-    """
+    """How this file already writes a log, or None if it does not."""
     if re.search(r"\blogger\b", source):
         return "logger"
     if re.search(r"\blog\.(debug|info|warning|error)\b", source):
         return "log"
     if language == "python" and re.search(r"^\s*import logging\b", source, re.MULTILINE):
         return "logging"
-    if language != "python" and re.search(r"\bconsole\.(log|info)\b", source):
+    if language != "python" and re.search(r"\bconsole\.(log|info|error)\b", source):
         # Console output is weak record-keeping, but a file already using it has
         # made that choice; matching it is less intrusive than imposing another.
         return "console"
@@ -60,9 +64,6 @@ def build_logging_fix(
 ) -> Optional[SuggestedFix]:
     """Insert a log line after the statement that invokes the model."""
     logger = _logger_expression(source, language)
-    if logger is None:
-        return None
-
     lines = source.splitlines()
     if start_line < 1 or end_line > len(lines) or end_line < start_line:
         return None
@@ -71,18 +72,31 @@ def build_logging_fix(
     indent = re.match(r"\s*", span[0]).group(0)
 
     if language == "python":
-        entry = (
-            f'{indent}{logger}.info("ai_inference", '
-            f'extra={{"provider_call": "{callee}"}})'
-        )
+        if logger is None:
+            # Nothing in this file logs. The import is function-local so the
+            # patch stays within the lines it says it changes; move it to the
+            # top of the file if that suits the codebase better.
+            entry = (
+                f"{indent}import logging\n"
+                f'{indent}logging.getLogger(__name__).info('
+                f'"ai_inference", extra={{"provider_call": "{callee}"}})'
+            )
+        else:
+            entry = (
+                f'{indent}{logger}.info("ai_inference", '
+                f'extra={{"provider_call": "{callee}"}})'
+            )
     else:
+        # `console` needs no import, so a file with no logger still gets a
+        # self-contained patch.
+        target = logger or "console"
         entry = (
-            f'{indent}{logger}.info("ai_inference", '
+            f'{indent}{target}.info("ai_inference", '
             f'{{ provider_call: "{callee}" }});'
         )
 
     return SuggestedFix(
-        description=_DESCRIPTION,
+        description=_DESCRIPTION if logger else _DESCRIPTION_NEW_LOGGER,
         start_line=start_line,
         end_line=end_line,
         replacement="\n".join([*span, entry]),

@@ -24,7 +24,12 @@ _LOG_METHODS = {
     "capture_message", "capture_event", "add_event", "track",
 }
 
-_LOG_MARKERS = ("log", "metric", "journal", "record")
+_LOG_MARKERS = ("log", "metric", "journal", "record", "console")
+
+# Verbs that name the act of writing something down. Generous on purpose:
+# missing a real record costs a finding, claiming one that is not there
+# costs a false accusation.
+_RECORDING_VERBS = ("log", "record", "audit", "track", "capture", "emit", "journal")
 
 # Naming any of these is itself the evidence — these libraries exist to record
 # things, and their call shapes look nothing like `logger.info`.
@@ -52,8 +57,12 @@ def _is_logging_call(callee: str) -> bool:
     if not any(marker in lowered for marker in _LOG_MARKERS):
         return False
     tail = lowered.rsplit(".", 1)[-1]
-    # `audit_log(...)` is a bare function; `logger.info(...)` is a method.
-    return tail in _LOG_METHODS or "log" in tail
+    if tail in _LOG_METHODS:
+        return True
+    # A bare recording function: `audit_log(...)`, `recordInference(...)`,
+    # `trackEvent(...)`. Requiring the name to end in a logger verb missed
+    # every one of these — including the helper written to answer this rule.
+    return any(verb in tail for verb in _RECORDING_VERBS)
 
 
 class Article12Logging(Rule):
@@ -91,11 +100,18 @@ class Article12Logging(Rule):
         if not ctx.uses_provider:
             return []
 
-        module_logs = any(_is_logging_call(call.callee) for call in ctx.calls)
+        # A log that only runs on failure records failures. Article 12 asks for
+        # the events the system performed, so a call inside an exception handler
+        # does not count as recording the inference. Guardia's own API routes
+        # log only in their catch blocks, which is exactly this case.
+        def records(call) -> bool:
+            return _is_logging_call(call.callee) and not call.in_error_handler
+
+        module_logs = any(records(call) for call in ctx.calls)
 
         findings: list[CodeFinding] = []
         for func in ctx.file.functions:
-            if any(_is_logging_call(call.callee) for call in func.calls):
+            if any(records(call) for call in func.calls):
                 continue
             if any(
                 marker in decorator.lower()
