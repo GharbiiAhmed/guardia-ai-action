@@ -49,16 +49,24 @@ class FunctionInfo:
 @dataclass
 class RepoModel:
     functions: list[FunctionInfo] = field(default_factory=list)
-    # bare name -> (invocation, hops). hops 0 means the function invokes
-    # directly; 2 means two calls away.
-    reaching: dict[str, tuple[Invocation, int]] = field(default_factory=dict)
+    # (file, name) -> (invocation, hops). Keyed on the specific function, not
+    # its bare name: every Next.js route handler is called `POST`, so a
+    # name-keyed map told an alert-rules endpoint it called OpenAI because a
+    # chat endpoint in another file did. Edges between functions still resolve
+    # by name — that is the cross-file approximation — but the function being
+    # asked about is identified exactly.
+    reaching: dict[tuple[str, str], tuple[Invocation, int]] = field(default_factory=dict)
     disclosure: bool = False
+    # Which files carry an AI notice. A boolean was not enough: one notice
+    # anywhere silenced every endpoint in the repository, so a chat route went
+    # unreported because an unrelated page mentioned AI-generated drafts.
+    disclosure_files: list[str] = field(default_factory=list)
     # Whether anything in the repository tests for bias. Article 10's claim is
     # an absence over the whole repo, so it cannot be answered file by file.
     fairness_tested: bool = False
 
-    def reaches_model(self, name: str) -> Optional[tuple[Invocation, int]]:
-        return self.reaching.get(name)
+    def reaches_model(self, file: str, name: str) -> Optional[tuple[Invocation, int]]:
+        return self.reaching.get((file, name))
 
 
 def index_file(model) -> list[FunctionInfo]:
@@ -107,24 +115,26 @@ def build(
     indexed: list[FunctionInfo],
     disclosure: bool = False,
     fairness_tested: bool = False,
+    disclosure_files: list[str] | None = None,
 ) -> RepoModel:
     """Propagate 'invokes a model' backwards along call edges."""
     model = RepoModel(
         functions=indexed,
         disclosure=disclosure,
+        disclosure_files=disclosure_files or [],
         fairness_tested=fairness_tested,
     )
 
-    # Which bare names invoke directly.
+    # Functions that invoke a model themselves.
     frontier: deque[tuple[str, Invocation, int]] = deque()
     for info in indexed:
         if info.invocation is not None:
-            existing = model.reaching.get(info.name)
-            if existing is None or existing[1] > 0:
-                model.reaching[info.name] = (info.invocation, 0)
-                frontier.append((info.name, info.invocation, 0))
+            model.reaching[(info.file, info.name)] = (info.invocation, 0)
+            frontier.append((info.name, info.invocation, 0))
 
-    # Callers of a reaching function reach it too, one hop further out.
+    # Callers of a reaching function reach it too, one hop further out. The
+    # edge is matched by name, since resolving imports properly is a much
+    # larger machine; the caller itself is recorded by file and name.
     callers: dict[str, list[FunctionInfo]] = {}
     for info in indexed:
         for callee_name in info.calls:
@@ -137,10 +147,11 @@ def build(
         for caller in callers.get(name, []):
             if caller.name == name:          # direct recursion
                 continue
-            known = model.reaching.get(caller.name)
+            key = (caller.file, caller.name)
+            known = model.reaching.get(key)
             if known is not None and known[1] <= hops + 1:
                 continue
-            model.reaching[caller.name] = (invocation, hops + 1)
+            model.reaching[key] = (invocation, hops + 1)
             frontier.append((caller.name, invocation, hops + 1))
 
     return model

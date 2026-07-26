@@ -130,7 +130,7 @@ def analyze_workspace(
 
     models: list[FileModel] = []
     indexed: list[callgraph.FunctionInfo] = []
-    found_disclosure = False
+    disclosure_files: list[str] = []
     found_fairness = False
     scanned = skipped = out_of_scope = 0
 
@@ -146,11 +146,10 @@ def analyze_workspace(
                 # reading once — but only until one is found, since a single
                 # notice settles the question. Files outside the shipped system
                 # cannot carry a runtime notice.
-                if (not found_disclosure and disclosure.is_template(rel)
-                        and scope.in_scope(rel)):
+                if disclosure.is_template(rel) and scope.in_scope(rel):
                     text = _read(full)
                     if text and disclosure.has_disclosure(text):
-                        found_disclosure = True
+                        disclosure_files.append(rel)
                 continue
 
             if not include_non_shipped and not scope.in_scope(rel):
@@ -176,8 +175,8 @@ def analyze_workspace(
             models.append(model)
             # String literals only: a comment saying "this is an AI" informs
             # the reader of the code, not the user of the product.
-            if not found_disclosure and disclosure.in_strings(model.user_strings):
-                found_disclosure = True
+            if disclosure.in_strings(model.user_strings):
+                disclosure_files.append(rel)
             # Article 10 asks whether fairness is tested anywhere at all, so
             # every file counts — including the ones out of scope for findings.
             if not found_fairness and art10.repo_tests_fairness(source):
@@ -197,7 +196,10 @@ def analyze_workspace(
             indexed.extend(callgraph.index_file(model))
 
     repo = callgraph.build(
-        indexed, disclosure=found_disclosure, fairness_tested=found_fairness
+        indexed,
+        disclosure=bool(disclosure_files),
+        fairness_tested=found_fairness,
+        disclosure_files=disclosure_files,
     )
 
     # ---- pass 2: run the rules with reachability available ----

@@ -18,10 +18,59 @@ available error.
 """
 from __future__ import annotations
 
+import re
+
 from .. import callgraph, disclosure, fingerprint, providers
 from ..fixers import build_disclosure_fix, build_js_disclosure_fix
 from ..models import CodeFinding, LegalReference
 from .base import Rule, RuleContext
+
+# How many notice locations to name before the list stops being readable.
+_MAX_NAMED = 3
+
+# Path segments that say nothing about which feature a file belongs to. Two
+# files both living under `app/` are not related; two files both mentioning
+# `chat` almost certainly are.
+_GENERIC_SEGMENTS = {
+    "app", "src", "lib", "libs", "components", "component", "pages", "page",
+    "api", "routes", "router", "routers", "handlers", "templates", "template",
+    "static", "public", "assets", "views", "view", "index", "main", "server",
+    "backend", "frontend", "services", "service", "utils", "util", "common",
+    "shared", "core", "internal", "v1", "v2", "web", "www", "ui", "screens",
+}
+
+
+def _tokens(path: str) -> set[str]:
+    """Meaningful path words: segments and file stem, minus the generic ones."""
+    cleaned = path.lower().replace("\\", "/")
+    parts = re.split(r"[/_.\-]+", cleaned)
+    return {p for p in parts if p and p not in _GENERIC_SEGMENTS and not p.isdigit()
+            and p not in {"py", "ts", "tsx", "js", "jsx", "html", "vue", "svelte"}}
+
+
+def _covers(route_file: str, notice_file: str) -> bool:
+    """Does this notice plausibly belong to the same feature as this endpoint?
+
+    A template named for the same thing as the handler is its notice. A notice
+    on an unrelated page is not — which is how an Annex IV page came to exempt
+    a chat endpoint.
+    """
+    return bool(_tokens(route_file) & _tokens(notice_file))
+
+
+def _disclosure_note(elsewhere: list) -> str:
+    """The disclosure half of the claim, written to what was actually seen."""
+    if not elsewhere:
+        return (
+            "No disclosure that the response is AI-generated was found anywhere "
+            "in this repository."
+        )
+    shown = ", ".join(elsewhere[:_MAX_NAMED])
+    more = f" and {len(elsewhere) - _MAX_NAMED} other file(s)" if len(elsewhere) > _MAX_NAMED else ""
+    return (
+        f"No disclosure was found in this file. One appears in {shown}{more} — "
+        f"confirm it is shown to the people using this endpoint."
+    )
 
 
 class Article50Disclosure(Rule):
@@ -75,10 +124,21 @@ class Article50Disclosure(Rule):
         )
 
     def analyze(self, ctx: RuleContext) -> list[CodeFinding]:
+        # A notice in this file settles it: whatever this endpoint returns, the
+        # module that builds it discloses.
         if disclosure.in_strings(ctx.file.user_strings):
             return []
-        if ctx.repo is not None and ctx.repo.disclosure:
+
+        # A notice *somewhere else* is weaker evidence than it looks. Guardia's
+        # own frontend discloses on its Annex IV page, which silenced the chat
+        # route entirely — a different feature, exempting an endpoint it has
+        # nothing to do with. Rather than swallow the finding or ignore the
+        # notice, the finding is reported at lower confidence and says where the
+        # notice was found, so the reader can confirm it covers this endpoint.
+        notices = list(ctx.repo.disclosure_files) if ctx.repo is not None else []
+        if any(_covers(ctx.path, notice) for notice in notices):
             return []
+        elsewhere = notices
 
         findings: list[CodeFinding] = []
 
@@ -90,7 +150,7 @@ class Article50Disclosure(Rule):
                 None,
             )
             if module_call is not None:
-                findings.append(self._module_finding(ctx, module_call))
+                findings.append(self._module_finding(ctx, module_call, elsewhere))
 
         for func in ctx.file.functions:
             if not func.is_route:
@@ -103,10 +163,10 @@ class Article50Disclosure(Rule):
             if hops > self.max_hops:
                 continue
 
-            findings.append(self._finding(ctx, func, invocation, hops))
+            findings.append(self._finding(ctx, func, invocation, hops, elsewhere))
         return findings
 
-    def _module_finding(self, ctx: RuleContext, call) -> CodeFinding:
+    def _module_finding(self, ctx: RuleContext, call, elsewhere: list) -> CodeFinding:
         return CodeFinding(
             rule_id=self.rule_id,
             fingerprint=fingerprint.compute(
@@ -121,19 +181,18 @@ class Article50Disclosure(Rule):
             snippet=call.snippet,
             claim=(
                 f"This module is a user-facing application script and calls "
-                f"`{call.callee}`, and no disclosure that the response is "
-                f"AI-generated was found anywhere in this repository."
+                f"`{call.callee}`. " + _disclosure_note(elsewhere)
             ),
             legal=self.legal,
             severity=self.severity,
-            confidence="high",
+            confidence="medium" if elsewhere else "high",
             fix=None,
         )
 
     def _reach(self, ctx: RuleContext, func):
         """Where this handler reaches a model, and how far away."""
         if ctx.repo is not None:
-            return ctx.repo.reaches_model(func.name)
+            return ctx.repo.reaches_model(ctx.path, func.name)
 
         # Single-file analysis has no reachability information, so the only
         # defensible claim is about a call inside the handler itself.
@@ -144,7 +203,8 @@ class Article50Disclosure(Rule):
                 return callgraph.Invocation(ctx.path, call.line, call.callee, "sdk"), 0
         return None
 
-    def _finding(self, ctx: RuleContext, func, invocation, hops: int) -> CodeFinding:
+    def _finding(self, ctx: RuleContext, func, invocation, hops: int,
+                 elsewhere: list) -> CodeFinding:
         if hops == 0:
             path_note = "in the handler itself"
             confidence = "high"
@@ -157,6 +217,10 @@ class Article50Disclosure(Rule):
             confidence = "medium" if hops == 1 else "low"
 
         how = "an SDK call" if invocation.kind == "sdk" else "an HTTP request to a provider endpoint"
+
+        # A notice elsewhere in the repository makes the claim weaker, not void.
+        if elsewhere and confidence != "low":
+            confidence = "low" if confidence == "medium" else "medium"
 
         return CodeFinding(
             rule_id=self.rule_id,
@@ -175,8 +239,7 @@ class Article50Disclosure(Rule):
             snippet=func.snippet,
             claim=(
                 f"The endpoint `{func.name}` reaches a model via `{invocation.callee}` "
-                f"({how}, {path_note}), and no disclosure that the response is "
-                f"AI-generated was found anywhere in this repository."
+                f"({how}, {path_note}). " + _disclosure_note(elsewhere)
             ),
             legal=self.legal,
             severity=self.severity,
