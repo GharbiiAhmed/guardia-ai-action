@@ -8,5 +8,6 @@ Fixers are also allowed — expected — to decline. Returning None when the cod
 shape is not one we can transform safely is the normal case, not a failure.
 """
 from .art50 import build_disclosure_fix
+from .art50_js import build_disclosure_fix as build_js_disclosure_fix
 
-__all__ = ["build_disclosure_fix"]
+__all__ = ["build_disclosure_fix", "build_js_disclosure_fix"]

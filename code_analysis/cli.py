@@ -61,6 +61,24 @@ def _render_text(result, root: str) -> str:
     return "\n".join(lines)
 
 
+def _head_sha(path: str) -> str:
+    """The checked-out commit, so a manual run still dates its own evidence.
+
+    A record whose commit field is blank cannot answer "what was true when we
+    shipped", which is the only question it exists for.
+    """
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def _upload(result, args) -> None:
     """Send findings to the dashboard.
 
@@ -156,7 +174,11 @@ def main(argv: list[str] | None = None) -> int:
         help="the previous evidence record, to chain this one to it",
     )
     parser.add_argument("--repo", default="", help="repository name, recorded in the evidence")
-    parser.add_argument("--commit", default="", help="commit sha, recorded in the evidence")
+    parser.add_argument(
+        "--commit",
+        default="",
+        help="commit sha, recorded in the evidence; defaults to the checkout's HEAD",
+    )
     parser.add_argument(
         "--signing-key",
         help="HMAC key binding the record to its holder; without one the chain "
@@ -202,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[guardia] Rule cards for {len(rules)} rule(s) written to "
               f"{args.rule_cards}.", file=sys.stderr)
         return 0
+
+    if not args.commit:
+        args.commit = _head_sha(args.path)
 
     result = analyze_workspace(args.path, rules=rules, include_non_shipped=args.include_tests)
 

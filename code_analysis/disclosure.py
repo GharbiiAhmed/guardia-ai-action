@@ -35,6 +35,10 @@ PATTERNS = [
         r"\bnot (a )?(human|person)\b.{0,40}\bai\b",
         r"powered by (an?\s+)?ai\b",
         r"\bautomated (system|assistant|agent|response)\b",
+        # A field named for the purpose is itself the notice, whatever text it
+        # carries — including the one our own codemod inserts.
+        r"\bai[_\-]?disclosure\b",
+        r"\bai[_\-]?notice\b",
         r"guardia:\s*disclosure",
     )
 ]

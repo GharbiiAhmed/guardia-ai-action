@@ -19,7 +19,7 @@ available error.
 from __future__ import annotations
 
 from .. import callgraph, disclosure, fingerprint, providers
-from ..fixers import build_disclosure_fix
+from ..fixers import build_disclosure_fix, build_js_disclosure_fix
 from ..models import CodeFinding, LegalReference
 from .base import Rule, RuleContext
 
@@ -186,13 +186,11 @@ class Article50Disclosure(Rule):
 
     @staticmethod
     def _fix(ctx: RuleContext, func):
-        """The codemod is Python-only for now — other languages get no patch.
-
-        A JS/TS fixer needs its own transformation: the response shape there is
-        `Response.json({...})` or `res.json({...})`, not a returned dict.
-        """
+        """Each language patches the shape its responses actually take."""
         if ctx.file.language != "python":
-            return None
+            return build_js_disclosure_fix(
+                ctx.source, ctx.path, func.line, func.end_line,
+            )
 
         import ast
 

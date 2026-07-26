@@ -284,6 +284,11 @@ def from_javascript(path: str, source: str) -> Optional[FileModel]:
         # for a notice to actually live in a React component.
         if node.type in {"string", "template_string", "jsx_text"}:
             strings.append(_text(node, data).strip("'\"`"))
+        # Property names count too: `{ reply, ai_disclosure: "..." }` discloses
+        # by its field name. In Python a dict key is a string literal and is
+        # already covered; in JS it is a bare identifier.
+        elif node.type in {"property_identifier", "shorthand_property_identifier"}:
+            strings.append(_text(node, data))
         elif node.type in {"lexical_declaration", "variable_declaration"} and node.parent is not None \
                 and node.parent.type == "program":
             const_parts.append(_text(node, data))
@@ -338,3 +343,57 @@ def _mark_express_handlers(call_node, data: bytes, by_node: dict, model: FileMod
                 # Defined in another module — the analyzer resolves this once
                 # every file has been modelled.
                 model.route_registrations.add(name)
+
+
+# ---- support for the Article 50 codemod ----
+
+# How a JSON body reaches the client. `Response.json` and `NextResponse.json`
+# cover the Next.js App Router; `res.json` covers Express and the Pages Router.
+_JSON_RESPONSE_CALLS = (
+    "response.json", "nextresponse.json", "res.json", "reply.send", "res.send",
+)
+
+
+def json_response_objects(path: str, source: str, start_line: int, end_line: int) -> list:
+    """Object literals handed to a JSON response helper within a line range.
+
+    The Python codemod patches a returned dict. The equivalent here is the
+    object passed to `Response.json({...})`, which is why the two fixers cannot
+    share an implementation even though they make the same change.
+    """
+    if not AVAILABLE:
+        return []
+    data = source.encode("utf-8")
+    try:
+        tree = _parser_for(path).parse(data)
+    except Exception:
+        return []
+
+    found = []
+    for node in _walk(tree.root_node):
+        if node.type != "call_expression":
+            continue
+        line = node.start_point[0] + 1
+        if not (start_line <= line <= end_line):
+            continue
+        callee = _dotted(node.child_by_field_name("function"), data).lower()
+        if callee not in _JSON_RESPONSE_CALLS:
+            continue
+        args = node.child_by_field_name("arguments")
+        if args is None or not args.named_children:
+            continue
+        first = args.named_children[0]
+        if first.type != "object":
+            continue
+        keys = []
+        for pair in first.named_children:
+            key = pair.child_by_field_name("key") if pair.type == "pair" else None
+            if key is not None:
+                keys.append(_text(key, data).strip("'\"`"))
+        found.append({
+            "line": first.start_point[0] + 1,
+            "end_line": first.end_point[0] + 1,
+            "text": _text(first, data),
+            "keys": keys,
+        })
+    return found
