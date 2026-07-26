@@ -181,6 +181,59 @@ _NON_LLM_RECEIVERS = (
 )
 
 
+# Classical machine learning. Most high-risk AI under the Act is this, not
+# chatbots: creditworthiness, CV screening, biometrics. A loan approval system
+# calling `model.predict_proba()` was invisible to every rule until this, which
+# is the exact Annex III case the regulation is built around.
+ML_MODULES = {
+    "sklearn", "scikit-learn", "xgboost", "lightgbm", "catboost", "statsmodels",
+    "torch", "tensorflow", "keras", "jax", "flax", "onnxruntime", "joblib",
+    "pickle", "cloudpickle", "skops",
+}
+
+# Verbs that ask a trained model for an answer. Generic on their own — hence
+# the ML-context requirement below.
+PREDICTION_CALLS = (
+    "predict", "predict_proba", "predict_log_proba", "decision_function",
+    "score_samples", "infer", "run_inference",
+)
+
+
+def uses_ml(imports: set[str], callees: tuple[str, ...] = ()) -> bool:
+    """Does this file load or use a trained model?"""
+    if ML_MODULES & imports:
+        return True
+    # A model deserialised at runtime, with the library imported elsewhere.
+    return any(
+        callee.rsplit(".", 1)[-1] in {"load", "load_model"}
+        and callee.split(".", 1)[0] in {"joblib", "pickle", "keras", "tf", "torch"}
+        for callee in callees
+        if callee
+    )
+
+
+def is_prediction_call(callee: str) -> bool:
+    if not callee:
+        return False
+    return callee.rsplit(".", 1)[-1] in PREDICTION_CALLS
+
+
+def is_inference_call(
+    callee: str,
+    chain_context: bool = False,
+    ml_context: bool = False,
+) -> bool:
+    """Any model being asked for an output — generative or otherwise.
+
+    Article 50 cares only about generated content shown to a person, so it keeps
+    using `is_generation_call`. Articles 12 and 14 are about records and
+    oversight, which apply just as much to a credit score as to a chat reply.
+    """
+    if is_generation_call(callee, chain_context):
+        return True
+    return ml_context and is_prediction_call(callee)
+
+
 def _is_non_llm_receiver(receiver: str) -> bool:
     """Match receiver *tokens*, never raw substrings.
 

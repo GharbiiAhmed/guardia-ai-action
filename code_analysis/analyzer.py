@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 import time
 from typing import Optional
 
@@ -94,9 +95,15 @@ def analyze_model(
     for rule in rules:
         try:
             produced = rule.analyze(ctx)
-        except Exception:
-            # A broken rule must not take the scan down with it. Findings from
-            # the other rules are still worth returning.
+        except Exception as error:
+            # A broken rule must not take the scan down with it — the other
+            # rules' findings are still worth returning. But swallowing it
+            # silently hid a NameError behind "no findings", so it is reported.
+            print(
+                f"[guardia] rule {rule.rule_id} failed on {model.path}: "
+                f"{type(error).__name__}: {error}",
+                file=sys.stderr,
+            )
             continue
 
         for finding in produced:

@@ -51,7 +51,19 @@ class RuleContext:
         return providers.constructs_llm(tuple(c.callee for c in self.calls))
 
     def is_generation(self, callee: str) -> bool:
+        """Generated content — what Article 50 is about."""
         return providers.is_generation_call(callee, self.chain_context)
+
+    @property
+    def ml_context(self) -> bool:
+        """This file loads or uses a trained model."""
+        return providers.uses_ml(
+            self.file.imports, tuple(call.callee for call in self.calls),
+        )
+
+    def is_inference(self, callee: str) -> bool:
+        """Any model asked for an output — what Articles 12 and 14 are about."""
+        return providers.is_inference_call(callee, self.chain_context, self.ml_context)
 
     @property
     def uses_provider(self) -> bool:
@@ -60,8 +72,9 @@ class RuleContext:
             self.file.imports, tuple(call.callee for call in self.calls)
         ):
             return True
-        # A LangChain file may name no provider module directly.
-        return self.chain_context
+        # A LangChain file may name no provider module directly, and a
+        # classical model has no provider at all.
+        return self.chain_context or self.ml_context
 
     def occurrence_of(self, func: FunctionModel, call: CallRef) -> int:
         """Index of this call among identical calls in the same function.

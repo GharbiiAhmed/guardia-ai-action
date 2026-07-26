@@ -121,7 +121,7 @@ class Article12Logging(Rule):
                 continue
 
             for call in func.calls:
-                if not ctx.is_generation(call.callee):
+                if not ctx.is_inference(call.callee):
                     continue
 
                 where = (

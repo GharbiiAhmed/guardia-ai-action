@@ -44,16 +44,34 @@ _ACTION_MARKERS = (
 # collection mutations far more often than a decision being stored.
 _PERSIST_MARKERS = ("save", "commit", "insert", "upsert", "persist")
 
+# Measuring a model is not acting on a person. `search.predict(X_test)` feeding
+# `accuracy_score` is evaluation inside a training script, and it matched
+# because "score" is an action verb.
+_METRIC_MARKERS = (
+    "accuracy", "precision", "recall", "f1_", "roc", "auc", "mse", "rmse",
+    "mae", "r2_", "log_loss", "confusion", "classification_report",
+    "cross_val", "mean_squared", "mean_absolute", "silhouette", "calibration",
+)
+
 # Anything on this list means a person is in the loop somewhere in this
 # function. Generous on purpose: the cost of missing a review step is a false
 # accusation, and this rule is advisory precisely because that judgement is
 # hard.
+# Words that mean a person considered the decision. `verify`, `validate`,
+# `confirm` and `authorise` are gone: in practice they are authentication and
+# input checking — `verify_password`, `validate_request` — and treating them as
+# oversight silenced a loan-approval endpoint that reaches a credit model.
+# Authentication is not human review.
 _REVIEW_MARKERS = (
-    "review", "approv", "accept", "authoris", "authoriz",
-    "human", "manual", "confirm", "moderat", "escalat",
-    "verify", "validate", "oversight", "supervis", "audit", "queue", "pending",
+    "review", "approv", "human", "manual", "moderat", "escalat",
+    "oversight", "supervis", "audit", "queue", "pending",
     "draft", "propose", "suggest", "await", "consent", "acknowledg", "override",
 )
+
+
+def _is_metric(callee: str) -> bool:
+    lowered = callee.lower()
+    return any(marker in lowered for marker in _METRIC_MARKERS)
 
 
 def _matches(callee: str, markers: tuple[str, ...]) -> bool:
@@ -108,17 +126,44 @@ class Article14Oversight(Rule):
         )
 
     def analyze(self, ctx: RuleContext) -> list[CodeFinding]:
-        if not ctx.uses_provider:
-            return []
-
+        # No early return on `uses_provider`: the handler that applies a
+        # decision often imports nothing AI-related at all. LoanIQ's endpoint
+        # calls `predict_loan`, which lives two files away with the model —
+        # main.py names no ML library, so gating on this file's imports
+        # rejected the very case the rule exists for. Reachability is the
+        # evidence in that path.
         findings: list[CodeFinding] = []
         for func in ctx.file.functions:
             generation = next(
-                (c for c in func.calls if ctx.is_generation(c.callee)),
+                (c for c in func.calls if ctx.is_inference(c.callee)),
                 None,
             )
-            if generation is None:
+
+            # The decision is often applied a layer above the model call:
+            # LoanIQ predicts in `predict_loan` and writes "Approved" in the
+            # handler that calls it. Without following that edge the rule sees
+            # a prediction with nothing done to it, and an action with nothing
+            # predicting it, and reports neither.
+            if generation is not None and not ctx.uses_provider:
                 continue
+
+            reached = None
+            if generation is None:
+                if ctx.repo is None:
+                    continue
+                reached = ctx.repo.reaches_model(ctx.path, func.name)
+                if reached is None:
+                    continue
+                # Across a call graph, only a trained model counts. Following
+                # LLM edges reported sixteen findings in two chat applications
+                # where the "action" was passing a reply along —
+                # `send_message_to_model_wrapper`, `publish_event`. Handing on
+                # a chat response is not deciding something about a person, and
+                # the surface it reaches is Article 50's concern anyway. A
+                # classifier reached by a handler is a scoring decision, which
+                # is exactly what oversight is for.
+                if reached[0].kind != "model":
+                    continue
 
             # A review step anywhere in the function — or a decorator that
             # routes the result somewhere for approval — settles it.
@@ -135,12 +180,15 @@ class Article14Oversight(Rule):
                     if call is not generation
                     # A decision cannot be acted on before it is made. This
                     # alone removed several findings where the "action" ran
-                    # twenty lines above the model call.
-                    and call.line > generation.line
+                    # twenty lines above the model call. When the model is
+                    # called through a helper, any action in this function
+                    # comes after it by construction.
+                    and (generation is None or call.line > generation.line)
                     # Recording the output is not acting on it —
                     # `commit_conversation_trace` matched "commit".
                     and not _is_logging_call(call.callee)
                     and not _is_constructor(call.callee)
+                    and not _is_metric(call.callee)
                     and (_matches(call.callee, _ACTION_MARKERS)
                          or _matches(call.callee, _PERSIST_MARKERS))
                 ),
@@ -149,25 +197,40 @@ class Article14Oversight(Rule):
             if action is None:
                 continue
 
+            if generation is not None:
+                callee, line, end_line, col = (
+                    generation.callee, generation.line, generation.end_line, generation.col,
+                )
+                where = f"inside `{func.qualname}`"
+            else:
+                invocation, hops = reached
+                callee = invocation.callee
+                line, end_line, col = func.line, func.end_line, func.col
+                hop_word = "call" if hops == 1 else "calls"
+                where = (
+                    f"{hops} {hop_word} below `{func.qualname}`, at "
+                    f"{invocation.file}:{invocation.line}"
+                )
+
             findings.append(CodeFinding(
                 rule_id=self.rule_id,
                 fingerprint=fingerprint.compute(
                     rule_id=self.rule_id,
                     path=ctx.path,
                     qualname=func.name,
-                    callee=generation.callee,
-                    occurrence=ctx.occurrence_of(func, generation),
+                    callee=callee,
+                    occurrence=0,
                 ),
                 file=ctx.path,
-                line=generation.line,
-                end_line=generation.end_line,
-                column=generation.col,
+                line=line,
+                end_line=end_line,
+                column=col,
                 symbol=func.qualname,
-                snippet=generation.snippet,
+                snippet=generation.snippet if generation else func.snippet,
                 claim=(
-                    f"`{generation.callee}` invokes a model inside `{func.qualname}`, "
-                    f"whose output is acted on by `{action.callee}` at line {action.line} "
-                    f"with no review, approval or escalation step in that function."
+                    f"`{callee}` invokes a model {where}, whose output is acted on by "
+                    f"`{action.callee}` at line {action.line} with no review, approval "
+                    f"or escalation step in that function."
                 ),
                 legal=self.legal,
                 severity=self.severity,

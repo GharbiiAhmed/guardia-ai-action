@@ -77,6 +77,10 @@ def index_file(model) -> list[FunctionInfo]:
     """
     all_callees = tuple(call.callee for call in model.all_calls())
     sdk_capable = providers.uses_provider(model.imports, all_callees)
+    chain_context = providers.constructs_llm(all_callees)
+    # Classical models count as invocations too, or a credit-scoring helper
+    # never becomes reachable from the handler that applies its decision.
+    ml_capable = providers.uses_ml(model.imports, all_callees)
 
     infos: list[FunctionInfo] = []
     for func in model.functions:
@@ -102,8 +106,10 @@ def index_file(model) -> list[FunctionInfo]:
 
             if info.invocation is not None:
                 continue
-            if sdk_capable and providers.is_generation_call(call.callee):
+            if sdk_capable and providers.is_generation_call(call.callee, chain_context):
                 info.invocation = Invocation(model.path, call.line, call.callee, "sdk")
+            elif ml_capable and providers.is_prediction_call(call.callee):
+                info.invocation = Invocation(model.path, call.line, call.callee, "model")
             elif providers.looks_like_http_model_call(call.callee, scope_text):
                 info.invocation = Invocation(model.path, call.line, call.callee, "http")
 
