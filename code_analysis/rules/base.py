@@ -121,6 +121,11 @@ def registry() -> list[Rule]:
     Ordered by how unambiguous the underlying legal text is, not by how useful
     the rule feels — a noisy rule discredits the precise ones next to it.
     """
+    from .art5_practices import (
+        Article5BiometricCategorisation,
+        Article5FacialScraping,
+        Article5SocialScoring,
+    )
     from .art5_signals import Article5EmotionSignal
     from .art10_data_governance import Article10DataGovernance
     from .art12_logging import Article12Logging
@@ -134,4 +139,7 @@ def registry() -> list[Rule]:
         Article14Oversight(),
         Article10DataGovernance(),
         Article5EmotionSignal(),
+        Article5FacialScraping(),
+        Article5BiometricCategorisation(),
+        Article5SocialScoring(),
     ]
