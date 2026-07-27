@@ -32,6 +32,50 @@ _EMOTION_MARKERS = (
     "stress_detection", "mood_detection",
 )
 
+# The FER-2013 label set, which almost every facial-emotion model emits. An HR
+# interview bot loaded its classifier with `keras.load_model` and mapped the
+# outputs through a dictionary of exactly these words — no named library
+# anywhere, so detection by import saw nothing at all.
+_EMOTION_LABELS = {
+    "angry", "anger", "disgust", "disgusted", "fear", "fearful", "happy",
+    "happiness", "sad", "sadness", "surprise", "surprised", "neutral",
+    "contempt",
+}
+
+# Enough of the vocabulary to be the label set rather than a coincidence. Three
+# is deliberate: "happy" and "sad" turn up in plenty of unrelated code, all
+# seven together do not.
+_LABEL_THRESHOLD = 3
+
+
+# Labels alone are not inference. langchain ships a 700-word list for generating
+# random names containing "happy", "sad" and "fear", next to nouns like
+# "student" — enough to trip both signals while classifying nothing. Emotion
+# inference needs something that runs a model over a face or a voice.
+_MODEL_MODULES = {
+    "cv2", "keras", "tensorflow", "tf", "torch", "torchvision", "mediapipe",
+    "dlib", "onnxruntime", "PIL", "sklearn", "librosa", "moviepy",
+}
+
+
+def _infers_emotion_from_labels(strings, imports: set[str], callees) -> bool:
+    """Does this file map the outputs of a model onto emotion labels?"""
+    if not (_MODEL_MODULES & {name.split(".")[0] for name in imports}):
+        return False
+    if not any(
+        callee.rsplit(".", 1)[-1] in {"predict", "predict_proba", "load_model", "forward"}
+        for callee in callees
+        if callee
+    ):
+        return False
+
+    seen = {
+        value.strip().lower()
+        for value in strings
+        if isinstance(value, str) and len(value) < 20
+    }
+    return len(seen & _EMOTION_LABELS) >= _LABEL_THRESHOLD
+
 # Context suggesting the workplace or an education institution.
 _WORKPLACE_MARKERS = (
     "employee", "employer", "workplace", "hiring", "recruit", "candidate",
@@ -61,6 +105,9 @@ class Article5EmotionSignal(Rule):
     title = "Emotion inference alongside workplace or education context — needs review"
 
     limitations = (
+        "Emotion inference is recognised either by a named library or by a file "
+        "mapping model outputs onto the standard emotion labels. A classifier "
+        "using its own vocabulary is missed.",
         "This rule decides nothing. Whether Article 5(1)(f) applies depends on who the "
         "subjects are, what the deployer uses the system for, and whether the medical "
         "or safety exception applies — none of which is in the code.",
@@ -97,6 +144,12 @@ class Article5EmotionSignal(Rule):
              or any(marker in name.lower() for marker in _EMOTION_MARKERS)),
             None,
         )
+        if library is None and _infers_emotion_from_labels(
+            ctx.file.user_strings,
+            ctx.imports,
+            tuple(call.callee for call in ctx.calls),
+        ):
+            library = "a facial emotion classifier"
         if library is None:
             return []
 
@@ -124,7 +177,7 @@ class Article5EmotionSignal(Rule):
             symbol=first.qualname if first else "<module>",
             snippet="",
             claim=(
-                f"`{library}` infers emotion, and this file references {context}. "
+                f"{library} infers emotion, and this file references {context}. "
                 f"Article 5(1)(f) prohibits emotion inference in workplaces and "
                 f"education institutions outside medical or safety uses — whether that "
                 f"applies here depends on who the subjects are and what the system is "
