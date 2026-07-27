@@ -173,7 +173,9 @@ def call_guardia_api(library_files: dict) -> Optional[dict]:
         return None
     try:
         headers = {"Authorization": f"Bearer {GUARDIA_API_KEY}", "Content-Type": "application/json"}
-        with httpx.Client(timeout=20) as client:
+        # A backend that scales to zero takes the better part of a minute to
+        # answer its first request, and 20s was not enough to see it wake up.
+        with httpx.Client(timeout=75) as client:
             r = client.post(
                 f"{GUARDIA_API_URL}/v1/discover/classify",
                 json={
@@ -186,6 +188,10 @@ def call_guardia_api(library_files: dict) -> Optional[dict]:
             )
             if r.status_code == 200:
                 return r.json()
+            # Returning None on any other status made a wrong URL, an expired
+            # key and a cold backend all look identical: no classification.
+            print(f"[guardia] Classification unavailable: HTTP {r.status_code} "
+                  f"{r.text[:160]}")
     except Exception as e:
         print(f"[guardia] Could not reach Guardia AI API: {e}")
     return None
