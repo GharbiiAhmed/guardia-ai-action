@@ -32,6 +32,32 @@ from .base import Rule, RuleContext
 # How many notice locations to name before the list stops being readable.
 _MAX_NAMED = 3
 
+# Responses that cannot carry a field. A streamed answer has no object to patch,
+# and a proxied one belongs to the provider. Injecting into either would corrupt
+# the protocol the client is parsing, so no fix is offered — but the finding
+# should say where the notice does belong rather than going quiet about it.
+_STREAMING_MARKERS = (
+    # Python
+    "streamingresponse", "streaminghttpresponse", "eventsourceresponse",
+    "stream=true", "stream_response",
+    # JavaScript: `stream: true` and a Response built from a ReadableStream
+    "stream: true", "stream:true", "readablestream", "new response(stream",
+    "tostreamresponse", "toaireadablestream",
+    # Both
+    "text/event-stream",
+)
+
+
+def _delivery_note(func_text: str) -> str:
+    lowered = func_text.lower()
+    if not any(marker in lowered for marker in _STREAMING_MARKERS):
+        return ""
+    return (
+        " This endpoint streams its response, so there is no payload to carry a "
+        "notice and no patch is offered: the disclosure belongs in the interface "
+        "that renders the stream."
+    )
+
 # Path segments that say nothing about which feature a file belongs to. Two
 # files both living under `app/` are not related; two files both mentioning
 # `chat` almost certainly are.
@@ -259,6 +285,7 @@ class Article50Disclosure(Rule):
             claim=(
                 f"The endpoint `{func.name}` reaches a model via `{invocation.callee}` "
                 f"({how}, {path_note}). " + _disclosure_note(elsewhere)
+                + _delivery_note(func.text)
             ),
             legal=self.legal,
             severity=self.severity,
