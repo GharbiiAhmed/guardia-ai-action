@@ -124,6 +124,8 @@ def registry() -> list[Rule]:
     from .art5_practices import (
         Article5BiometricCategorisation,
         Article5FacialScraping,
+        Article5LiveBiometricId,
+        Article5PredictivePolicing,
         Article5SocialScoring,
     )
     from .art5_signals import Article5EmotionSignal
@@ -142,4 +144,6 @@ def registry() -> list[Rule]:
         Article5FacialScraping(),
         Article5BiometricCategorisation(),
         Article5SocialScoring(),
+        Article5PredictivePolicing(),
+        Article5LiveBiometricId(),
     ]

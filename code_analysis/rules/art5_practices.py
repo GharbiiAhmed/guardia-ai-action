@@ -40,6 +40,19 @@ _PROTECTED_MARKERS = (
 )
 
 # Aggregating people into a single figure that follows them around.
+# Predicting who will offend, from who they are.
+_OFFENCE_MARKERS = (
+    "recidivism", "reoffend", "re_offend", "crime_risk", "criminal_risk",
+    "offender_score", "predictive_polic", "crime_predict", "arrest_predict",
+    "propensity_to_offend", "criminal_propensity",
+)
+
+# Identifying people from biometrics as they pass a camera.
+_LIVE_BIOMETRIC_MARKERS = (
+    "cctv", "surveillance", "live_feed", "realtime_face", "real_time_face",
+    "video_stream", "rtsp", "camera_feed", "public_space", "crowd_scan",
+)
+
 _SCORE_MARKERS = (
     "social_score", "citizen_score", "trust_score", "reputation_score",
     "behaviour_score", "behavior_score", "risk_score", "conduct_score",
@@ -225,4 +238,95 @@ class Article5SocialScoring(_Article5Signal):
             f"depends on how the score is used, which this scan cannot determine. "
             f"Scoring within its own context is high-risk under Annex III rather "
             f"than prohibited. Needs a human decision.",
+        )]
+
+
+class Article5PredictivePolicing(_Article5Signal):
+    rule_id = "GA-ART5-005"
+    title = "Predicting criminal offending from profiling — needs review"
+    paragraph = "1(d)"
+    recital = "Recital 42"
+    quote = (
+        "the placing on the market, the putting into service for this specific "
+        "purpose, or the use of an AI system for making risk assessments of natural "
+        "persons in order to assess or predict the risk of a natural person "
+        "committing a criminal offence, based solely on the profiling of a natural "
+        "person or on assessing their personality traits and characteristics; this "
+        "prohibition shall not apply to AI systems used to support the human "
+        "assessment of the involvement of a person in a criminal activity, which is "
+        "already based on objective and verifiable facts directly linked to a "
+        "criminal activity"
+    )
+    limitations = (
+        "The prohibition turns on the prediction being based *solely* on profiling "
+        "or personality traits. A model using objective facts linked to a specific "
+        "criminal activity is expressly outside it, and which of the two this is "
+        "cannot be read from a call site.",
+        "Detection is by naming convention: a model predicting offending under "
+        "another name is missed.",
+    )
+
+    def analyze(self, ctx: RuleContext) -> list[CodeFinding]:
+        marker = _mentions(ctx, _OFFENCE_MARKERS)
+        if not marker:
+            return []
+        if not ctx.ml_context and not ctx.uses_provider:
+            return []
+        return [self._finding(
+            ctx, marker,
+            f"This file references `{marker}` and runs a model over people. "
+            f"Article 5(1)(d) prohibits predicting whether someone will commit a "
+            f"criminal offence where that rests solely on profiling or personality "
+            f"traits, and expressly permits systems supporting a human assessment "
+            f"grounded in objective facts about a specific criminal activity. "
+            f"Which of those this is cannot be read from the code. Needs a human "
+            f"decision.",
+        )]
+
+
+class Article5LiveBiometricId(_Article5Signal):
+    rule_id = "GA-ART5-006"
+    title = "Live biometric identification in a public space — needs review"
+    paragraph = "1(h)"
+    recital = "Recitals 32-37"
+    quote = (
+        "the use of 'real-time' remote biometric identification systems in publicly "
+        "accessible spaces for the purposes of law enforcement, unless and in so far "
+        "as such use is strictly necessary for one of the following objectives: "
+        "(i) the targeted search for specific victims of abduction, trafficking in "
+        "human beings or sexual exploitation of human beings, as well as the search "
+        "for missing persons; (ii) the prevention of a specific, substantial and "
+        "imminent threat to the life or physical safety of natural persons or a "
+        "genuine and present or genuine and foreseeable threat of a terrorist "
+        "attack; (iii) the localisation or identification of a person suspected of "
+        "having committed a criminal offence, for the purpose of conducting a "
+        "criminal investigation or prosecution or executing a criminal penalty for "
+        "offences referred to in Annex II and punishable in the Member State "
+        "concerned by a custodial sentence or a detention order for a maximum "
+        "period of at least four years."
+    )
+    limitations = (
+        "This prohibition applies to law enforcement use in publicly accessible "
+        "spaces, with three exceptions and a judicial authorisation regime. None of "
+        "that is visible in code - a building's own access control uses the same "
+        "libraries and is not covered at all.",
+        "The word 'real-time' is doing heavy lifting in the text and cannot be "
+        "distinguished from batch processing at a call site.",
+    )
+
+    def analyze(self, ctx: RuleContext) -> list[CodeFinding]:
+        faces = _uses_faces(ctx)
+        live = _mentions(ctx, _LIVE_BIOMETRIC_MARKERS)
+        if not (faces and live):
+            return []
+        return [self._finding(
+            ctx, faces,
+            f"This file uses {faces} and also references `{live}`. Article 5(1)(h) "
+            f"restricts real-time remote biometric identification in publicly "
+            f"accessible spaces for law enforcement, subject to three narrow "
+            f"exceptions and prior authorisation. Whether this is law enforcement, "
+            f"whether the space is publicly accessible and whether it is real-time "
+            f"are all outside what this scan can see - access control on your own "
+            f"premises uses the same libraries and is not covered. Needs a human "
+            f"decision.",
         )]
