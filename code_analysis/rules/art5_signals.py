@@ -154,7 +154,7 @@ class Article5EmotionSignal(Rule):
             return []
 
         # Context can come from the path or from the identifiers in the file.
-        context = _context_of(ctx.path) or _context_of(ctx.source)
+        context = _context_of(ctx.path) or _context_of(ctx.code_text)
         if context is None:
             return []
 

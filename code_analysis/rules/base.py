@@ -38,6 +38,16 @@ class RuleContext:
         return self.file.source
 
     @property
+    def code_text(self) -> str:
+        """Source with module-level constant tables blanked.
+
+        What a keyword rule should search: a file that merely *lists* a word —
+        a marker table, a moderation vocabulary, a policy config — is naming it,
+        not doing it. Falls back to the raw source where this is not computed.
+        """
+        return self.file.code_text or self.file.source
+
+    @property
     def imports(self) -> set[str]:
         return self.file.imports
 

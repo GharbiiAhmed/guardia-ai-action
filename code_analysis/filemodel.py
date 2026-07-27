@@ -11,6 +11,9 @@ Adding a third language means writing one builder, not touching any rule.
 """
 from __future__ import annotations
 
+import ast
+import io
+import tokenize
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -65,6 +68,19 @@ class FileModel:
     # is what a person interacts with. GPTInterviewer, a behavioural screening
     # tool, has no HTTP layer at all.
     ui_surface: bool = False
+    # The source with the contents of module-level constant tables blanked out.
+    #
+    # A rule that searches raw text cannot tell code that *does* a thing from
+    # code that *names* it. Guardia's own Article 5 rule file lists "cctv",
+    # "scrape" and "face_encodings" as the markers it looks for, and so reported
+    # itself for facial scraping, biometric categorisation and live biometric
+    # identification. Any vocabulary list — a policy engine, a moderation
+    # config, a security scanner — has the same shape.
+    #
+    # Only the string *contents* are blanked; the names, the structure and every
+    # other line are untouched, so a marker used anywhere else still matches.
+    # Equal to `source` for languages where this is not computed.
+    code_text: str = ""
 
     def all_calls(self) -> list[CallRef]:
         calls = list(self.module_calls)
@@ -172,7 +188,73 @@ def from_python(path: str, source: str, tree) -> FileModel:
             func.is_route = True
 
     model.user_strings = disclosure.python_string_literals(tree)
+    model.code_text = _blank_constant_tables(source, tree)
     return model
+
+
+def _blank_constant_tables(source: str, tree: ast.Module) -> str:
+    """Blank the parts of a file that describe rather than do.
+
+    Three kinds of text can name a behaviour without performing it, and a
+    keyword rule cannot tell them from the real thing:
+
+    * **comments** — a note about cctv footage is not a camera;
+    * **docstrings** — including a quoted article of the Regulation, which is
+      how the word "CCTV" ends up in a file whose job is to look for it;
+    * **strings assigned to a name** — a marker table, a moderation vocabulary,
+      a list of column names. Declaring a word is not using it.
+
+    A string passed to a call is left alone: `analyze(image, actions=["race"])`
+    is the behaviour itself. Everything outside these spans is untouched, so a
+    marker appearing anywhere else still matches.
+    """
+    spans: list[tuple[int, int, int, int]] = []
+
+    def record(node) -> None:
+        if getattr(node, "end_lineno", None) is not None:
+            spans.append((node.lineno, node.col_offset,
+                          node.end_lineno, node.end_col_offset))
+
+    # Strings assigned to a name, at any nesting level.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            for inner in ast.walk(value):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    record(inner)
+        # Docstrings: the first statement of a module, class or function.
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                record(body[0].value)
+
+    # Comments are not in the tree at all.
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                spans.append((token.start[0], token.start[1],
+                              token.end[0], token.end[1]))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+
+    if not spans:
+        return source
+
+    lines = source.splitlines(keepends=True)
+    for start_line, start_col, end_line, end_col in spans:
+        for lineno in range(start_line, end_line + 1):
+            index = lineno - 1
+            if index >= len(lines):
+                continue
+            line = lines[index]
+            begin = start_col if lineno == start_line else 0
+            finish = end_col if lineno == end_line else len(line.rstrip("\n"))
+            lines[index] = line[:begin] + " " * max(0, finish - begin) + line[finish:]
+    return "".join(lines)
 
 
 # Frameworks where the whole module is the user interface.

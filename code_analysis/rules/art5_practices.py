@@ -62,7 +62,7 @@ _SCORE_MARKERS = (
 
 def _mentions(ctx: RuleContext, markers) -> str | None:
     """The first marker this file mentions, in code or in a string."""
-    haystack = (ctx.path + "\n" + ctx.source).lower()
+    haystack = (ctx.path + "\n" + ctx.code_text).lower()
     return next((m for m in markers if m in haystack), None)
 
 
@@ -71,7 +71,7 @@ def _uses_faces(ctx: RuleContext) -> str | None:
     named = next((lib for lib in _FACE_LIBRARIES if lib in roots), None)
     if named:
         return named
-    lowered = (ctx.path + "\n" + ctx.source).lower()
+    lowered = (ctx.path + "\n" + ctx.code_text).lower()
     if "face_encodings" in lowered or "face_landmarks" in lowered or "facenet" in lowered:
         return "a face recognition pipeline"
     return None
