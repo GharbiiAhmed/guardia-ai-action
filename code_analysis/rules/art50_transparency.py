@@ -67,6 +67,14 @@ _GENERIC_SEGMENTS = {
     "static", "public", "assets", "views", "view", "index", "main", "server",
     "backend", "frontend", "services", "service", "utils", "util", "common",
     "shared", "core", "internal", "v1", "v2", "web", "www", "ui", "screens",
+    # Framework-mandated names. Every Next.js App Router endpoint is called
+    # route.ts, so treating `route` as meaningful made one disclosing endpoint
+    # exempt every other endpoint in the repository.
+    "route", "handler", "layout", "middleware", "controller", "controllers",
+    "endpoint", "endpoints", "function", "functions",
+    # Category folders, not features: in a repository about AI, `ai` says
+    # nothing about which feature a notice belongs to.
+    "ai", "llm", "llms", "genai", "ml",
 }
 
 
