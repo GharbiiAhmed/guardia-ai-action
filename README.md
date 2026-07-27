@@ -68,7 +68,8 @@ jobs:
 |--------|-------------|
 | `risk-level` | Highest risk found: `prohibited` \| `high_risk` \| `limited` \| `minimal` \| `none` |
 | `libraries-found` | Comma-separated list of AI libraries detected |
-| `compliance-score` | Compliance score 0–100 (requires Guardia AI account) |
+| `classification-confidence` | How confident the risk classification is. Empty when no Guardia account is configured. |
+| `compliance-score` | Deprecated alias for `classification-confidence`. This action does not compute a compliance score — whether you comply depends on your system's purpose and deployment context, which a code scan cannot determine. |
 
 ---
 
@@ -167,11 +168,19 @@ introduced, commit by commit.
     fail-on-findings: 'none'    # observe first; switch to 'high' when you're ready
 
 - uses: github/codeql-action/upload-sarif@v3
+  continue-on-error: true
   with:
     sarif_file: guardia.sarif
 ```
 
-`security-events: write` is needed on the job for the SARIF upload.
+The job needs `security-events: write` for the upload and `actions: read`, which
+`upload-sarif` uses to attach results to the run.
+
+**Code scanning is not available on every repository.** A private repository
+needs GitHub Advanced Security for it; without that the upload fails, which is
+why the step above is `continue-on-error`. Nothing else is affected — the PR
+comment, the inline suggestions and the dashboard record all still work, and the
+SARIF file is on disk if you want to keep it as a build artifact.
 
 ### Accepting a finding
 

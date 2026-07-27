@@ -585,8 +585,17 @@ def build_findings_section(result) -> list:
 
 
 def post_pr_comment(comment: str) -> None:
-    if not GITHUB_TOKEN or not GITHUB_REPO or not GITHUB_PR_NUMBER:
-        print("[guardia] Skipping PR comment — no GITHUB_TOKEN, REPO, or PR_NUMBER set.")
+    missing = [name for name, value in (
+        ("GITHUB_TOKEN", GITHUB_TOKEN),
+        ("GITHUB_REPOSITORY", GITHUB_REPO),
+        ("PR number", GITHUB_PR_NUMBER),
+    ) if not value]
+    if missing:
+        # Naming all three left no way to tell "this is a push, there is no PR"
+        # apart from "the token was never passed and comments are broken".
+        note = (" (expected on a push — there is no pull request to comment on)"
+                if missing == ["PR number"] else "")
+        print(f"[guardia] Skipping PR comment — {', '.join(missing)} not set{note}.")
         return
     try:
         with httpx.Client(timeout=15) as client:
@@ -663,8 +672,20 @@ def main() -> None:
     set_output("risk-level", risk_level)
     set_output("libraries-found", ",".join(library_files.keys()))
     set_output("config-indicators", ",".join(config_hits.keys()))
-    compliance_score = str(api_result.get("confidence", 0)) if api_result else "0"
-    set_output("compliance-score", compliance_score)
+    # This was published as "compliance score 0–100" while carrying the
+    # classifier's confidence, and 0 whenever no classification came back — so a
+    # repository with one advisory finding reported a score of zero. An absent
+    # score is now absent rather than a failing grade, and the value is named
+    # for what it is.
+    classification_confidence = api_result.get("confidence") if api_result else None
+    set_output("classification-confidence",
+               "" if classification_confidence is None else str(classification_confidence))
+    set_output("compliance-score",
+               "" if classification_confidence is None else str(classification_confidence))
+    if api_result is None and GUARDIA_API_KEY:
+        print("[guardia] No classification returned — check guardia-api-url "
+              f"(currently {GUARDIA_API_URL or 'unset'}). It is the backend API, "
+              "not the app URL that records findings.")
 
     blocking = []
     if analysis is not None:

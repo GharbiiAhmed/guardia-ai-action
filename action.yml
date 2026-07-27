@@ -8,9 +8,9 @@ branding:
 
 inputs:
   guardia-api-url:
-    description: 'Your Guardia AI backend URL (e.g. https://api.guardia-ai.com)'
+    description: 'Guardia AI backend API — used for risk classification only. Not the app URL.'
     required: false
-    default: 'https://api.guardia-ai.com'
+    default: 'https://guardia-ai.onrender.com'
   guardia-app-url:
     description: 'Your Guardia AI app URL — where findings are recorded'
     required: false
@@ -69,8 +69,10 @@ outputs:
     description: 'Highest risk level found: prohibited | high_risk | limited | minimal | none'
   libraries-found:
     description: 'Comma-separated list of AI libraries detected'
+  classification-confidence:
+    description: 'How confident the risk classification is. Empty when no Guardia account is configured — this action does not compute a compliance score.'
   compliance-score:
-    description: 'Overall compliance score 0–100'
+    description: 'Deprecated alias for classification-confidence. It never was a compliance score; use classification-confidence.'
 
 runs:
   using: 'docker'
